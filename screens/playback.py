@@ -6,7 +6,7 @@ from config.config import (
     font_time, font_title, font_artist, text_color, background_color, progress_bar_width
 )
 from utils.display import scroll_text, animate_gif
-from utils.volumio_api import fetch_playback_data
+from utils.volumio_api import get_volumio_state as fetch_playback_data
 
 # Load the playback GIF
 GIF_PATH = os.path.join(os.path.dirname(__file__), "../assets/playback.gif")
@@ -53,8 +53,9 @@ def display_playback_screen(device):
         draw.text(((screen_width - artist_width) // 2, 50), formatted_artist, font=font_artist, fill=text_color)
 
     # Animate GIF with overlay elements
-    animate_gif(device, GIF_PATH, overlay_callback=draw_static_info)
+    animate_gif(device, draw_static_info)
 
     # Ensure Title Scrolling Works Correctly
     if font_title.getbbox(title)[2] > device.width:
-        scroll_text(device, title, font_title, draw_static_info, progress_percent, artist)
+        scroll_text(device, title, speed=2)  # Adjust the speed as needed
+

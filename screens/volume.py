@@ -16,28 +16,36 @@ def fetch_volume():
     return None
 
 def display_volume_screen(device):
-    """Displays the volume screen with the current volume percentage and signals when done."""
-    volume = fetch_volume()
-
-    if volume is None:
+    """Displays the volume screen and manages its own timeout logic."""
+    last_volume = fetch_volume()
+    if last_volume is None:
         print("?? Failed to fetch volume from API")
-        return False  # Indicate failure (this prevents the playback screen from updating incorrectly)
+        return False  # Prevents playback screen from updating incorrectly
 
-    with canvas(device) as draw:
-        # Clear screen with a black rectangle
-        draw.rectangle((0, 0, device.width, device.height), fill="black")
-        
-        # Format the volume text
-        volume_text = f"Volume: {volume}%"
-        text_width = font_volume.getbbox(volume_text)[2]
-        text_x = (device.width - text_width) // 2
-        text_y = (device.height - font_volume.size) // 2
-        
-        # Draw the text centered on the screen
-        draw.text((text_x, text_y), volume_text, font=font_volume, fill=text_color)
+    last_input_time = time.time()
+    while True:
+        volume = fetch_volume()
+        if volume is None:
+            continue  # Skip iteration if API fails temporarily
 
-    print(f"?? Volume updated via API: {volume}%")
+        if volume != last_volume:
+            last_volume = volume
+            last_input_time = time.time()  # Reset input timeout
 
-    time.sleep(2)  # Keep volume screen active for 2 seconds
+            with canvas(device) as draw:
+                draw.rectangle((0, 0, device.width, device.height), fill="black")
+                volume_text = f"Volume: {volume}%"
+                text_width = font_volume.getbbox(volume_text)[2]
+                text_x = (device.width - text_width) // 2
+                text_y = (device.height - font_volume.size) // 2
+                draw.text((text_x, text_y), volume_text, font=font_volume, fill=text_color)
 
-    return True  # Signal to main.py that volume screen is done and playback should resume
+            print(f"?? Volume updated via API: {volume}%")
+
+        # If no new input for 1.5s, begin exit countdown
+        if time.time() - last_input_time > 1.5:
+            print("?? Waiting 4s before exiting volume screen...")
+            time.sleep(4)
+            return True  # Signal main.py to return to playback screen
+
+        time.sleep(0.2)  # Poll every 200ms

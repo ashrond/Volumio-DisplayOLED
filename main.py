@@ -20,7 +20,6 @@ device = ssd1322(serial)
 # Global state
 current_screen = "startup"
 last_volume = None  # Track last volume level
-volume_timer = None  # Timer for volume screen transition
 sio = socketio.Client()
 screen_lock = threading.Lock()  # Prevents screen overwrites
 
@@ -47,7 +46,7 @@ def disconnect():
 
 @sio.on("pushState")
 def on_message(data):
-    global current_screen, last_volume, volume_timer
+    global current_screen, last_volume
 
     print(f"?? WebSocket Raw Data:\n{json.dumps(data, indent=2)}")
 
@@ -61,24 +60,30 @@ def on_message(data):
     if current_screen == "startup":
         return  # Ensure startup completes before handling updates
 
-    # Handle volume changes - Instant update, no delay
+    # Handle volume changes - Instantly switch to volume screen
     if volume is not None and volume != last_volume:
         last_volume = volume
+        current_screen = "volume"
         success = display_volume_screen(device)
-        print(f"?? Volume screen displayed: {volume}%")
-
+        
         if success:
             print("?? Volume screen complete. Returning to playback.")
             safe_display(display_playback_screen, device)
-        return  # Prevents playback state updates from interfering
+            current_screen = "playback"
 
-    # Handle playback state changes only when volume isn't changing
-    if state == "play":
-        safe_display(display_playback_screen, device, title, artist)
-    elif state == "pause":
-        safe_display(display_pause_screen, device)
-    elif state == "stop":
-        safe_display(display_idle_screen, device)
+        return  # Prevent playback state updates from interfering
+
+    # Handle playback state changes only when not in volume screen
+    if current_screen != "volume":
+        if state == "play":
+            safe_display(display_playback_screen, device)
+            current_screen = "playback"
+        elif state == "pause":
+            safe_display(display_pause_screen, device)
+            current_screen = "pause"
+        elif state == "stop":
+            safe_display(display_idle_screen, device)
+            current_screen = "idle"
 
     print(f"?? Current screen: {current_screen}")
 
@@ -89,13 +94,6 @@ def startup_screen():
     print("?? Startup screen finished. Switching to playback.")
     current_screen = "playback"
     safe_display(display_playback_screen, device)
-
-def return_to_playback():
-    """Ensures that playback screen is restored after volume adjustments."""
-    global current_screen
-    print("?? Volume screen complete. Returning to playback.")
-    safe_display(display_playback_screen, device)  # No extra arguments
-    current_screen = "playback"
 
 if __name__ == "__main__":
     sio.connect(VOLUMIO_WS_URL)
