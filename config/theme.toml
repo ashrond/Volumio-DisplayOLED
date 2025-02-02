@@ -1,0 +1,13 @@
+[fonts]
+time = 24
+title = 12
+artist = 10
+volume = 20
+
+[layout]
+progress_bar_height = 3
+progress_bar_width = 200
+
+[colors]
+text_color = "white"
+background_color = "black"
