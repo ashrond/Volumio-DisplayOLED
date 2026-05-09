@@ -11,3 +11,33 @@ progress_bar_width = 200
 [colors]
 text_color = "white"
 background_color = "black"
+
+[logging]
+enabled = true
+level = "INFO"             # INFO is the right default for 24/7. Switch to DEBUG only for diagnosis.
+file = "/tmp/vfd.log"
+max_bytes = 2097152        # rotate file at 2 MB
+backup_count = 3           # keep 3 rotated logs (so total disk use is bounded to ~8 MB)
+
+[volume]
+# The volume screen shows "MAX" when value reaches this number, and "MIN" at 0.
+# Set this to whatever you have configured as max in Volumio's web UI.
+max = 20
+# If a no-change volume pushState (e.g. you pressed vol-up at max) arrives within
+# this window after the last real volume change, treat it as a button press and
+# show the volume screen anyway. Other conditions (state=play, no title change,
+# no seek jump) filter out unrelated periodic events even with a wide window.
+button_recent_window = 30.0
+
+[timing]
+# All in seconds. Tweak to taste.
+playback_refresh_seconds = 1.0     # how often the clock + progress bar re-render
+volume_hold_seconds = 1.5          # volume screen stays this long after last volume change, then -> playback
+idle_after_stop_seconds = 8.0      # transition loading -> idle if status=stop persists this long
+render_tick_seconds = 0.05         # render thread cadence (20 Hz). Lower = smoother animation, more CPU
+# legacy knobs (kept for the disconnect-loading screen which still runs blocking)
+loading_anim_seconds = 3.0
+pause_anim_seconds = 0.6
+idle_anim_seconds = 0.6
+volume_idle_seconds = 0.6
+volume_exit_seconds = 0.3

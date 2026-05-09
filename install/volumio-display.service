@@ -1,0 +1,39 @@
+[Unit]
+Description=Volumio OLED Display Driver
+Documentation=file:///home/volumio/Volumio-Display/AUTOSTART.md
+# Start after the network is ready and after Volumio itself.
+# main.py also loops connecting to ws://localhost:3000 until Volumio answers,
+# so even if Volumio takes longer than expected, we just wait.
+After=network-online.target volumio.service
+Wants=network-online.target volumio.service
+
+[Service]
+Type=notify
+User=volumio
+Group=volumio
+WorkingDirectory=/home/volumio/Volumio-Display
+ExecStart=/usr/bin/python3 -u main.py
+
+# main.py calls _systemd_notify("READY=1") right after the Volumio websocket
+# is up but BEFORE the 15s startup-screen hold, so this generous timeout is
+# never normally hit — it just protects against a wedged connect attempt.
+TimeoutStartSec=120
+
+# Auto-restart on any exit (crash, watchdog kill, voluntary non-zero).
+Restart=always
+RestartSec=5
+# Cap restart storms: at most 10 restarts in a 10-minute window before systemd
+# stops trying. Catches genuinely broken installs without infinite-looping.
+StartLimitIntervalSec=600
+StartLimitBurst=10
+
+# Systemd watchdog. main.py's watchdog thread sends WATCHDOG=1 every 15s; if
+# 60s passes without a ping (e.g. SPI bus hung), systemd kills + restarts us.
+WatchdogSec=60
+NotifyAccess=main
+
+# Modest hardening — enough to avoid surprises, not so much that GPIO/SPI break.
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

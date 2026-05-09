@@ -1,105 +1,615 @@
+"""VFD driver — render-thread architecture.
+
+Design:
+- on_message handlers ONLY update state and set current_screen. They return immediately.
+- A single render thread is the ONLY writer to SPI. It picks what to paint based on
+  current_screen, ticks at RENDER_TICK_SECONDS (default 50ms = 20Hz), and animates
+  GIF screens (loading, pause, idle) by stepping through frames at GIF_FRAME_PERIOD.
+- This eliminates: concurrent SPI writes, volume-screen twitching, uninterruptible loading.
+"""
+import os
+import sys
 import time
+import signal
+import socket
 import threading
 import socketio
 import json
+import logging
 from luma.core.interface.serial import spi
 from luma.oled.device import ssd1322
+from luma.core.render import canvas
+from PIL import Image, ImageSequence
+
+from config.config import (
+    log,
+    font_title, font_artist, font_volume,
+    text_color,
+    GIF_PATH_LOADING,
+    PLAYBACK_REFRESH_SECONDS, VOLUME_HOLD_SECONDS,
+    IDLE_AFTER_STOP_SECONDS, RENDER_TICK_SECONDS,
+    VOLUME_MAX, VOLUME_BUTTON_RECENT_WINDOW,
+)
 from screens.startup import display_startup
 from screens.playback import display_playback_screen
-from screens.pause import display_pause_screen
-from screens.idle import display_idle_screen
-from screens.volume import display_volume_screen
-from screens.loading import display_loading_screen
 
+_HERE = os.path.dirname(os.path.abspath(__file__))
+GIF_PATH_PAUSE = os.path.join(_HERE, "assets/pause.gif")
+GIF_PATH_IDLE = os.path.join(_HERE, "assets/idle.gif")
 VOLUMIO_WS_URL = "http://localhost:3000"
 
-# Initialize SPI connection
+# Animated screens advance one GIF frame per this interval (10fps). Render tick is faster
+# (20Hz) for snappy state transitions, but full SPI repaints at 20Hz are wasteful.
+GIF_FRAME_PERIOD = 0.1
+
+# --- SPI device ---
 serial = spi(device=0, port=0, bus_speed_hz=8000000)
 device = ssd1322(serial)
 
-# Global state
+# --- State (mutations guarded by state_lock) ---
+state_lock = threading.Lock()
 current_screen = "startup"
-last_volume = None  # Track last volume level
-sio = socketio.Client()
-screen_lock = threading.Lock()  # Prevents screen overwrites
+last_volume = None
+last_title = None
+last_artist = None
+last_seek = -1
+last_duration = 1
+last_status = None
+last_event_wall = 0.0           # time of most recent play pushState
+last_volume_event_wall = 0.0    # time of most recent volume change
+last_stop_wall = 0.0            # time when status=stop first seen
+last_status_change_wall = 0.0   # time of last status (play/pause/stop) transition — for IR-bounce debounce
+volume_initialized = False
+PAUSE_TO_PLAY_DEBOUNCE = 1.5    # ignore play events within this window after pause (IR auto-repeat)
+render_wake = threading.Event()
+shutdown_event = threading.Event()  # set on SIGTERM/SIGINT
+SLOW_PAINT_MS = 30
+SLOW_HANDLER_MS = 20
+last_screen_change_perf = 0.0
 
-def safe_display(func, *args):
-    """Ensures only one screen update runs at a time."""
-    with screen_lock:
-        func(*args)
+# Watchdog: render thread updates this on every successful tick. The watchdog
+# thread checks that the gap stays under WATCHDOG_TIMEOUT_S; if it doesn't,
+# the process exits non-zero so systemd (or whatever supervisor) restarts us.
+last_render_tick_wall = time.time()
+WATCHDOG_TIMEOUT_S = 60
+WATCHDOG_CHECK_INTERVAL_S = 15
+
+# --- GIF frame cache ---
+_frame_cache = {}
+
+
+def _load_frames(path, resize_to_screen):
+    if path in _frame_cache:
+        return _frame_cache[path]
+    if not os.path.exists(path):
+        log.warning("GIF not found: %s", path)
+        _frame_cache[path] = []
+        return []
+    try:
+        with Image.open(path) as gif:
+            if resize_to_screen:
+                frames = [f.convert("1").resize((device.width, device.height)) for f in ImageSequence.Iterator(gif)]
+            else:
+                frames = [f.convert("1") for f in ImageSequence.Iterator(gif)]
+    except Exception as e:
+        log.error("failed to load GIF %s: %s", path, e)
+        _frame_cache[path] = []
+        return []
+    _frame_cache[path] = frames
+    log.info("loaded %d frames from %s", len(frames), os.path.basename(path))
+    return frames
+
+
+def _prewarm_gifs():
+    """Decode all animated GIFs into memory at startup, so first-use paints don't stall."""
+    _load_frames(GIF_PATH_LOADING, resize_to_screen=True)
+    _load_frames(GIF_PATH_PAUSE, resize_to_screen=False)
+    _load_frames(GIF_PATH_IDLE, resize_to_screen=False)
+
+
+def _coerce_int(v, default):
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return default
+
+
+# --- Painters (each writes ONE frame; called only from render thread) ---
+
+def _paint_volume(volume):
+    with canvas(device) as draw:
+        draw.rectangle((0, 0, device.width, device.height), fill="black")
+        text = f"Volume: {volume}"
+        tw = font_volume.getbbox(text)[2]
+        tx = (device.width - tw) // 2
+        ty = (device.height - font_volume.size) // 2
+        draw.text((tx, ty), text, font=font_volume, fill=text_color)
+        indicator = None
+        if volume >= VOLUME_MAX:
+            indicator = "MAX"
+        elif volume <= 0:
+            indicator = "MIN"
+        if indicator:
+            iw = font_title.getbbox(indicator)[2]
+            ix = (device.width - iw) // 2
+            draw.text((ix, device.height - 14), indicator, font=font_title, fill=text_color)
+
+
+def _paint_loading(idx, error=""):
+    frames = _load_frames(GIF_PATH_LOADING, resize_to_screen=True)
+    if not frames:
+        return
+    f = frames[idx % len(frames)]
+    with canvas(device) as draw:
+        draw.bitmap((0, 0), f, fill="white")
+        text = "LOADING"
+        tw = font_title.getbbox(text)[2]
+        tx = (device.width - tw) // 2
+        draw.text((tx, 0), text, font=font_title, fill=text_color)
+        if error:
+            ew = font_artist.getbbox(error)[2]
+            ex = (device.width - ew) // 2
+            draw.text((ex, device.height - 12), error, font=font_artist, fill=text_color)
+
+
+def _paint_pause(idx):
+    frames = _load_frames(GIF_PATH_PAUSE, resize_to_screen=False)
+    if not frames:
+        return
+    f = frames[idx % len(frames)]
+    x = (device.width - f.size[0]) // 2
+    y = (device.height - f.size[1]) // 2
+    with canvas(device) as draw:
+        draw.bitmap((x, y), f, fill="white")
+
+
+def _paint_idle(idx):
+    frames = _load_frames(GIF_PATH_IDLE, resize_to_screen=False)
+    if not frames:
+        return
+    f = frames[idx % len(frames)]
+    with canvas(device) as draw:
+        draw.bitmap((0, 0), f, fill="white")
+
+
+# --- Render thread ---
+
+def render_loop():
+    """Outer wrapper that catches any unhandled exception so we don't silently
+    leak a dead thread. On crash, log + exit non-zero for service-manager restart."""
+    try:
+        _render_loop_inner()
+    except BaseException as e:
+        log.critical("render loop crashed: %s", e, exc_info=True)
+        os._exit(3)
+
+
+def _render_loop_inner():
+    global last_render_tick_wall
+    log.info("render loop started (tick=%.2fs, gif=%dfps)", RENDER_TICK_SECONDS, int(1.0 / GIF_FRAME_PERIOD))
+    pause_idx = 0
+    idle_idx = 0
+    loading_idx = 0
+    last_playback_paint = 0.0
+    last_pause_paint = 0.0
+    last_idle_paint = 0.0
+    last_loading_paint = 0.0
+    last_painted_screen = None
+    last_painted_volume = None
+    last_logged_change_perf = 0.0
+
+    while not shutdown_event.is_set():
+        render_wake.wait(timeout=RENDER_TICK_SECONDS)
+        render_wake.clear()
+        if shutdown_event.is_set():
+            break
+        wake_perf = time.perf_counter()
+
+        with state_lock:
+            change_perf = last_screen_change_perf
+            screen = current_screen
+            volume = last_volume
+            title = last_title
+            artist = last_artist
+            seek = last_seek
+            duration = last_duration
+            status = last_status
+            volume_event_wall = last_volume_event_wall
+            stop_wall = last_stop_wall
+            event_wall = last_event_wall
+
+        now = time.time()
+
+        # --- Auto-transitions ---
+        if screen == "volume" and now - volume_event_wall > VOLUME_HOLD_SECONDS:
+            with state_lock:
+                if current_screen == "volume":
+                    if last_status == "pause":
+                        target = "pause"
+                    elif last_status == "stop":
+                        if last_stop_wall and (time.time() - last_stop_wall) > IDLE_AFTER_STOP_SECONDS:
+                            target = "idle"
+                        else:
+                            target = "loading"
+                    else:
+                        target = "playback"
+                    log.info("volume hold expired (>%.1fs), -> %s", VOLUME_HOLD_SECONDS, target)
+                    _set_screen_unsafe(target)
+            continue
+
+        if screen == "loading" and status == "stop" and stop_wall and now - stop_wall > IDLE_AFTER_STOP_SECONDS:
+            with state_lock:
+                if current_screen == "loading" and last_status == "stop":
+                    log.info("stop persisted >%.1fs, -> idle", IDLE_AFTER_STOP_SECONDS)
+                    _set_screen_unsafe("idle")
+            continue
+
+        # Reset animation indices when entering an animated screen freshly
+        if screen != last_painted_screen:
+            if screen == "pause":
+                pause_idx = 0
+                last_pause_paint = 0
+            elif screen == "idle":
+                idle_idx = 0
+                last_idle_paint = 0
+            elif screen == "loading":
+                loading_idx = 0
+                last_loading_paint = 0
+            last_painted_screen = screen
+
+        if change_perf and change_perf != last_logged_change_perf:
+            wake_lag_ms = (wake_perf - change_perf) * 1000
+            log.info("latency: state-change -> render wake = %.1fms (screen=%s)", wake_lag_ms, screen)
+            last_logged_change_perf = change_perf
+
+        # --- Paint ---
+        try:
+            if screen == "startup":
+                pass
+
+            elif screen == "volume":
+                v = volume if volume is not None else 0
+                if v != last_painted_volume or screen != last_painted_screen:
+                    _timed_paint("volume", _paint_volume, v)
+                    last_painted_volume = v
+
+            elif screen == "loading":
+                if now - last_loading_paint >= GIF_FRAME_PERIOD:
+                    _timed_paint("loading", _paint_loading, loading_idx)
+                    loading_idx += 1
+                    last_loading_paint = now
+
+            elif screen == "pause":
+                if now - last_pause_paint >= GIF_FRAME_PERIOD:
+                    _timed_paint("pause", _paint_pause, pause_idx)
+                    pause_idx += 1
+                    last_pause_paint = now
+
+            elif screen == "idle":
+                if now - last_idle_paint >= GIF_FRAME_PERIOD:
+                    _timed_paint("idle", _paint_idle, idle_idx)
+                    idle_idx += 1
+                    last_idle_paint = now
+
+            elif screen == "playback":
+                if status != "play" or title is None:
+                    continue
+                if now - last_playback_paint < PLAYBACK_REFRESH_SECONDS:
+                    continue
+                # Cold-start guard: if no play event seen yet, don't extrapolate from epoch
+                if event_wall > 0:
+                    elapsed_ms = (now - event_wall) * 1000.0
+                    seek_now = min(seek + elapsed_ms, duration * 1000.0)
+                else:
+                    seek_now = seek
+                _timed_paint("playback", display_playback_screen, device, title, artist, int(seek_now), duration)
+                last_playback_paint = now
+
+        except Exception as e:
+            log.error("paint failed (screen=%s): %s", screen, e)
+
+        last_render_tick_wall = time.time()  # heartbeat for watchdog
+
+    log.info("render loop exiting")
+    try:
+        with canvas(device) as draw:
+            draw.rectangle((0, 0, device.width, device.height), fill="black")
+    except Exception:
+        pass
+
+
+def _set_screen_unsafe(name):
+    """Caller must hold state_lock."""
+    global current_screen, last_screen_change_perf
+    if current_screen != name:
+        log.info("screen: %s -> %s", current_screen, name)
+        current_screen = name
+        last_screen_change_perf = time.perf_counter()
+        render_wake.set()
+
+
+def _timed_paint(name, fn, *args):
+    """Run a painter; warn on slow paints. (No per-paint debug log — too spammy.)"""
+    t0 = time.perf_counter()
+    fn(*args)
+    ms = (time.perf_counter() - t0) * 1000
+    if ms > SLOW_PAINT_MS:
+        log.warning("paint %s SLOW: %.1fms", name, ms)
+    return ms
+
+
+# --- Socket.IO handlers (state-only, no SPI writes) ---
+
+# Construct with explicit reconnection + silenced loggers. Auto-reconnect with
+# backoff is handled by the library; do NOT call sio.connect() from disconnect()
+# (creates duplicate background threads over months of flapping).
+sio = socketio.Client(
+    reconnection=True,
+    reconnection_attempts=0,    # 0 = infinite
+    reconnection_delay=2,
+    reconnection_delay_max=30,
+    logger=False,
+    engineio_logger=False,
+)
+
 
 @sio.event
 def connect():
-    print("?? WebSocket Connected to Volumio")
+    log.info("ws connect")
     sio.emit("subscribe", {})
     sio.emit("getState", {})
 
+
 @sio.event
 def disconnect():
-    print("?? WebSocket Disconnected. Attempting to reconnect...")
-    safe_display(display_loading_screen, device, "Reconnecting...")
-    time.sleep(5)
-    try:
-        sio.connect(VOLUMIO_WS_URL)
-    except Exception as e:
-        print(f"?? WebSocket Reconnection Failed: {e}")
+    # python-socketio's auto-reconnect handles re-establishing the connection.
+    # We just flip the screen so the user sees activity.
+    log.warning("ws disconnect — auto-reconnect in progress")
+    with state_lock:
+        _set_screen_unsafe("loading")
+
+
+@sio.event
+def connect_error(data):
+    log.warning("ws connect_error: %s", data)
+
 
 @sio.on("pushState")
 def on_message(data):
-    global current_screen, last_volume
+    t0 = time.perf_counter()
+    try:
+        _handle_pushstate(data)
+    except Exception as e:
+        log.exception("on_message: %s", e)
+    finally:
+        ms = (time.perf_counter() - t0) * 1000
+        if ms > SLOW_HANDLER_MS:
+            log.warning("on_message SLOW: %.1fms", ms)
 
-    print(f"?? WebSocket Raw Data:\n{json.dumps(data, indent=2)}")
+
+def _handle_pushstate(data):
+    global volume_initialized, last_volume, last_title, last_artist, last_seek, last_duration
+    global last_status, last_event_wall, last_stop_wall, last_volume_event_wall, last_status_change_wall
 
     state = data.get("status", "")
     title = data.get("title", "Unknown")
     artist = data.get("artist", "Unknown")
-    volume = data.get("volume", None)
+    raw_volume = data.get("volume")
+    volume = _coerce_int(raw_volume, None) if raw_volume is not None else None
+    seek = _coerce_int(data.get("seek"), 0)
+    duration = _coerce_int(data.get("duration"), 1) or 1
 
-    print(f"?? Extracted - Title: {title}, Artist: {artist}, Volume: {volume}")
+    # Raw dump only when DEBUG, and outside the lock — json.dumps is expensive
+    # and used to hold the state_lock unnecessarily.
+    if log.isEnabledFor(logging.DEBUG):
+        log.debug("pushState raw: %s", json.dumps(data))
 
-    if current_screen == "startup":
-        return  # Ensure startup completes before handling updates
+    with state_lock:
+        log.info(
+            "pushState: status=%s title=%r vol=%s seek=%.1fs/%ss screen=%s",
+            state, title, volume, seek / 1000.0, duration, current_screen,
+        )
 
-    # Handle volume changes - Instantly switch to volume screen
-    if volume is not None and volume != last_volume:
-        last_volume = volume
-        current_screen = "volume"
-        success = display_volume_screen(device)
-        
-        if success:
-            print("?? Volume screen complete. Returning to playback.")
-            safe_display(display_playback_screen, device)
-            current_screen = "playback"
+        if current_screen == "startup":
+            return
 
-        return  # Prevent playback state updates from interfering
+        now = time.time()
+        prev_status = last_status
+        prev_title = last_title
+        prev_seek = last_seek
+        prev_volume = last_volume
+        seek_decreased = (prev_seek >= 0 and seek < prev_seek - 5000)
+        title_changed = (title != prev_title)
 
-    # Handle playback state changes only when not in volume screen
-    if current_screen != "volume":
-        if state == "play":
-            safe_display(display_playback_screen, device)
-            current_screen = "playback"
+        # --- Volume detection ---
+        volume_event = False
+        if volume is not None:
+            if not volume_initialized:
+                last_volume = volume
+                volume_initialized = True
+                log.info("volume initialized: %s", volume)
+            elif volume != prev_volume:
+                last_volume = volume
+                last_volume_event_wall = now
+                volume_event = True
+            elif (state == "play" and prev_status == "play"
+                  and not title_changed and not seek_decreased
+                  and last_volume_event_wall
+                  and (now - last_volume_event_wall) < VOLUME_BUTTON_RECENT_WINDOW):
+                last_volume_event_wall = now
+                volume_event = True
+
+        # IR-bounce debounce: ignore play events within PAUSE_TO_PLAY_DEBOUNCE of a pause
+        ignore_state_change = False
+        if (state == "play" and prev_status == "pause"
+                and last_status_change_wall
+                and (now - last_status_change_wall) < PAUSE_TO_PLAY_DEBOUNCE):
+            log.info("ignoring play event %.2fs after pause (IR bounce)",
+                     now - last_status_change_wall)
+            ignore_state_change = True
+
+        if not ignore_state_change:
+            if state != prev_status:
+                last_status_change_wall = now
+            last_status = state
+            if state == "play":
+                last_title = title
+                last_artist = artist
+                last_seek = seek
+                last_duration = duration
+                last_event_wall = now
+                last_stop_wall = 0.0
+            elif state == "pause":
+                last_stop_wall = 0.0
+            elif state == "stop":
+                if prev_status != "stop":
+                    last_stop_wall = now
+
+        # --- Pick target screen ---
+        if volume_event:
+            if current_screen != "volume":
+                _set_screen_unsafe("volume")
+            else:
+                render_wake.set()
+        elif current_screen == "volume":
+            pass
+        elif ignore_state_change:
+            pass
+        elif state == "play":
+            if current_screen != "playback":
+                _set_screen_unsafe("playback")
         elif state == "pause":
-            safe_display(display_pause_screen, device)
-            current_screen = "pause"
+            if current_screen != "pause":
+                _set_screen_unsafe("pause")
         elif state == "stop":
-            safe_display(display_idle_screen, device)
-            current_screen = "idle"
+            if current_screen not in ("loading", "idle"):
+                _set_screen_unsafe("loading")
 
-    print(f"?? Current screen: {current_screen}")
 
 def startup_screen():
-    """Runs the startup animation before switching to playback."""
-    global current_screen
-    safe_display(display_startup, device)
-    print("?? Startup screen finished. Switching to playback.")
-    current_screen = "playback"
-    safe_display(display_playback_screen, device)
+    """Runs the startup animation (blocks up to ~15s, interruptible via shutdown_event).
+    Returns True on full completion, False if shutdown was requested mid-startup."""
+    if not display_startup(device, shutdown_event):
+        return False
+    log.info("startup finished, requesting state")
+    try:
+        sio.emit("getState", {})
+    except Exception as e:
+        log.warning("getState emit failed during startup: %s", e)
+    with state_lock:
+        _set_screen_unsafe("playback")
+    return True
+
+
+def _systemd_notify(msg):
+    """Send a state message to systemd via NOTIFY_SOCKET. No-op if not under systemd."""
+    addr = os.environ.get("NOTIFY_SOCKET")
+    if not addr:
+        return
+    if addr.startswith("@"):
+        addr = "\0" + addr[1:]
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as s:
+            s.sendto(msg.encode(), addr)
+    except Exception as e:
+        log.debug("sd_notify failed: %s", e)
+
+
+def watchdog_thread():
+    """Detect a stuck/dead render thread and force-exit so the service manager restarts us.
+    Also pets the systemd watchdog if we're running under one."""
+    log.info("watchdog started (timeout=%ds, check=%ds)", WATCHDOG_TIMEOUT_S, WATCHDOG_CHECK_INTERVAL_S)
+    while not shutdown_event.is_set():
+        if shutdown_event.wait(timeout=WATCHDOG_CHECK_INTERVAL_S):
+            return
+        gap = time.time() - last_render_tick_wall
+        if gap > WATCHDOG_TIMEOUT_S:
+            log.critical("render thread silent for %.1fs (>%ds); forcing exit", gap, WATCHDOG_TIMEOUT_S)
+            os._exit(4)
+        _systemd_notify("WATCHDOG=1")
+
+
+def _connect_with_retry(retry_delay=2.0):
+    """Block until first successful connection to Volumio. Survives the case where
+    Volumio is not yet up at boot (common when both start together)."""
+    while not shutdown_event.is_set():
+        try:
+            sio.connect(VOLUMIO_WS_URL)
+            return
+        except Exception as e:
+            log.warning("waiting for Volumio (%s); retry in %.1fs", e, retry_delay)
+            time.sleep(retry_delay)
+
+
+def _shutdown(signum, _frame):
+    """Handle SIGTERM/SIGINT: signal threads to stop, disconnect cleanly."""
+    if shutdown_event.is_set():
+        return  # idempotent
+    log.info("received signal %d, shutting down", signum)
+    shutdown_event.set()
+    render_wake.set()
+    try:
+        if sio.connected:
+            sio.disconnect()
+    except Exception as e:
+        log.warning("sio.disconnect during shutdown: %s", e)
+
 
 if __name__ == "__main__":
-    sio.connect(VOLUMIO_WS_URL)
+    signal.signal(signal.SIGTERM, _shutdown)
+    signal.signal(signal.SIGINT, _shutdown)
 
-    # Start startup screen synchronously before handling any WebSocket events
-    startup_screen()
+    log.info("=== vfd starting ===")
+    _prewarm_gifs()
+    _connect_with_retry()
+    if shutdown_event.is_set():
+        sys.exit(0)
 
-    # Keep WebSocket active
-    sio.wait()
+    # Tell systemd we're ready BEFORE the 15s startup hold so Type=notify
+    # services don't hit TimeoutStartSec.
+    _systemd_notify("READY=1\nSTATUS=connected to Volumio, playing startup screen")
+
+    if not startup_screen():
+        log.info("startup interrupted by shutdown")
+        _systemd_notify("STOPPING=1")
+        sys.exit(0)
+
+    _systemd_notify("STATUS=running")
+
+    # Render thread is NOT a daemon — we want a clean drain on shutdown,
+    # and we want the process to NOT silently exit if the main thread returns.
+    render_thread = threading.Thread(target=render_loop, daemon=False)
+    render_thread.start()
+    threading.Thread(target=watchdog_thread, daemon=True).start()
+
+    # Self-healing wait loop. python-socketio's auto-reconnect handles flaps,
+    # but if sio.wait() ever returns (library exhausted, fatal error), don't
+    # let the process die silently — try again, then escalate to a non-zero
+    # exit so a service manager can restart us.
+    consecutive_failures = 0
+    while not shutdown_event.is_set():
+        try:
+            sio.wait()
+        except Exception as e:
+            log.error("sio.wait raised: %s", e)
+        if shutdown_event.is_set():
+            break
+        consecutive_failures += 1
+        log.warning("sio.wait returned unexpectedly (failure #%d); reconnecting in 5s", consecutive_failures)
+        time.sleep(5)
+        try:
+            sio.connect(VOLUMIO_WS_URL)
+            consecutive_failures = 0
+        except Exception as e:
+            log.error("reconnect failed: %s", e)
+            if consecutive_failures >= 5:
+                log.error("giving up after %d failures; exiting non-zero for service manager", consecutive_failures)
+                shutdown_event.set()
+                render_wake.set()
+                render_thread.join(timeout=2.0)
+                sys.exit(1)
+
+    _systemd_notify("STOPPING=1")
+    log.info("waiting for render thread to drain")
+    render_thread.join(timeout=2.0)
+    log.info("=== vfd exit ===")
