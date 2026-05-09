@@ -27,7 +27,8 @@ from config.config import (
     text_color,
     GIF_PATH_LOADING,
     PLAYBACK_REFRESH_SECONDS, VOLUME_HOLD_SECONDS,
-    IDLE_AFTER_STOP_SECONDS, RENDER_TICK_SECONDS,
+    IDLE_AFTER_STOP_SECONDS, SCREEN_OFF_AFTER_IDLE_SECONDS, RENDER_TICK_SECONDS,
+    PAUSE_TO_PLAY_DEBOUNCE_SECONDS, TRANSITION_HOLD_AT_END_SECONDS, TRANSITION_FADE_PORTION_CFG,
     VOLUME_MAX, VOLUME_BUTTON_RECENT_WINDOW,
     SCREENSAVER_MODE, SCREENSAVER_TARGET_POPULATION, SCREENSAVER_SPAWN_RATE,
     SCREENSAVER_MEDIAN_SPEED, SCREENSAVER_DRIFT_X, SCREENSAVER_DRIFT_Y,
@@ -69,12 +70,13 @@ _transition_behind_img = None   # snapshot of the screen we left (FROM)
 _transition_ahead_img = None    # snapshot/render of where we're going (TO) — used for static targets like playback
 _transition_start_perf = 0.0    # perf_counter at transition entry — drives the time-based progress curve
 
-# Extra time to HOLD the last frame of the play/pause symbol GIF before the
-# transition completes. Gives the symbol visual weight at peak before fading out.
-TRANSITION_HOLD_AT_END_S = 0.5
-# Symbol envelope: fade-in then hold then fade-out, expressed as fractions of
-# the total transition duration (gif_duration + TRANSITION_HOLD_AT_END_S).
-TRANSITION_FADE_PORTION = 0.22
+# Pulled from theme.toml [timing] so the future webUI can edit them.
+TRANSITION_HOLD_AT_END_S = TRANSITION_HOLD_AT_END_SECONDS
+TRANSITION_FADE_PORTION = TRANSITION_FADE_PORTION_CFG
+# Track entry into idle so we can fall to screen_off after SCREEN_OFF_AFTER_IDLE_SECONDS.
+_idle_entered_perf = 0.0
+_screen_off_entered_perf = 0.0
+_screen_off_panel_hidden = False
 # Fade state: (start_perf, duration, prev_image, new_image_or_None)
 # new_image is captured on the FIRST paint after the fade starts, then frozen
 # so we blend two static frames smoothly. Without this freeze, the fade would
@@ -136,7 +138,7 @@ last_volume_event_wall = 0.0    # time of most recent volume change
 last_stop_wall = 0.0            # time when status=stop first seen
 last_status_change_wall = 0.0   # time of last status (play/pause/stop) transition — for IR-bounce debounce
 volume_initialized = False
-PAUSE_TO_PLAY_DEBOUNCE = 1.5    # ignore play events within this window after pause (IR auto-repeat)
+PAUSE_TO_PLAY_DEBOUNCE = PAUSE_TO_PLAY_DEBOUNCE_SECONDS
 render_wake = threading.Event()
 shutdown_event = threading.Event()  # set on SIGTERM/SIGINT
 SLOW_PAINT_MS = 30
@@ -330,7 +332,9 @@ def render_loop():
 
 
 def _render_loop_inner():
-    global last_render_tick_wall
+    global last_render_tick_wall, _idle_entered_perf, _screen_off_entered_perf
+    global _screen_off_panel_hidden, _transition_behind_img, _transition_ahead_img
+    global _transition_start_perf
     log.info("render loop started (tick=%.2fs, gif=%dfps)", RENDER_TICK_SECONDS, int(1.0 / GIF_FRAME_PERIOD))
     idle_idx = 0
     loading_idx = 0
@@ -396,11 +400,23 @@ def _render_loop_inner():
                     _set_screen_unsafe("idle")
             continue
 
+        # Auto-transition: idle has been showing for too long → fade to black + sleep panel
+        if (screen == "idle" and _idle_entered_perf > 0
+                and SCREEN_OFF_AFTER_IDLE_SECONDS > 0
+                and time.perf_counter() - _idle_entered_perf > SCREEN_OFF_AFTER_IDLE_SECONDS):
+            with state_lock:
+                if current_screen == "idle":
+                    log.info("idle persisted >%.0fs, -> screen_off (panel sleep)",
+                             SCREEN_OFF_AFTER_IDLE_SECONDS)
+                    _set_screen_unsafe("screen_off")
+            continue
+
         # Reset animation indices when entering an animated screen freshly
         if screen != last_painted_screen:
             if screen == "idle":
                 idle_idx = 0
                 last_idle_paint = 0
+                _idle_entered_perf = time.perf_counter()
                 # Don't reset the screensaver when we're flowing in from
                 # transition_to_pause — its particle state was already animated
                 # in during the transition. Resetting would pop the screen back
@@ -408,13 +424,14 @@ def _render_loop_inner():
                 if last_painted_screen != "transition_to_pause":
                     screensaver.reset()
                     screensaver_replay.reset()
+            elif screen == "screen_off":
+                _screen_off_entered_perf = time.perf_counter()
             elif screen == "loading":
                 loading_idx = 0
                 last_loading_paint = 0
             elif screen in ("transition_to_pause", "transition_to_play"):
                 transition_idx = 0
                 last_transition_paint = 0
-                global _transition_behind_img, _transition_ahead_img, _transition_start_perf
                 _transition_behind_img = _last_displayed.copy() if _last_displayed is not None else None
                 _transition_ahead_img = None
                 _transition_start_perf = time.perf_counter()
@@ -536,6 +553,24 @@ def _render_loop_inner():
                                      _transition_ahead_img, progress, symbol_env)
                         transition_idx = sym_idx
 
+            elif screen == "screen_off":
+                # Render an all-black frame for the fade duration so the
+                # crossfade can fade idle → black, then put the OLED to sleep
+                # so it draws no power and accumulates no burn-in.
+                if not _screen_off_panel_hidden:
+                    sleep_after = FADE_SECONDS + 0.5
+                    if time.perf_counter() - _screen_off_entered_perf > sleep_after:
+                        try:
+                            device.hide()
+                            log.info("screen_off: panel hidden")
+                        except Exception as e:
+                            log.warning("device.hide() failed: %s", e)
+                        _screen_off_panel_hidden = True
+                    else:
+                        # Paint black so the fade has a target
+                        img = Image.new(device.mode, (device.width, device.height), "black")
+                        device.display(img)
+
             elif screen == "playback":
                 if status != "play" or title is None:
                     continue
@@ -566,12 +601,19 @@ def _render_loop_inner():
 
 def _set_screen_unsafe(name):
     """Caller must hold state_lock."""
-    global current_screen, last_screen_change_perf
+    global current_screen, last_screen_change_perf, _screen_off_panel_hidden
     if current_screen != name:
         old = current_screen
         log.info("screen: %s -> %s", current_screen, name)
         current_screen = name
         last_screen_change_perf = time.perf_counter()
+        # Wake the OLED panel if we're leaving screen_off, before any paint.
+        if old == "screen_off" and _screen_off_panel_hidden:
+            try:
+                device.show()
+            except Exception as e:
+                log.warning("device.show() failed: %s", e)
+            _screen_off_panel_hidden = False
         # Skip the standard crossfade if EITHER side is a transition screen —
         # transitions render their own primary-screen crossfade with the symbol
         # GIF superimposed, so the post-transition handoff is already smooth.
@@ -735,7 +777,7 @@ def _handle_pushstate(data):
         elif ignore_state_change:
             pass
         elif state == "play":
-            if current_screen in ("idle", "transition_to_pause"):
+            if current_screen in ("idle", "screen_off", "transition_to_pause"):
                 _set_screen_unsafe("transition_to_play")
             elif current_screen not in ("playback", "transition_to_play"):
                 _set_screen_unsafe("playback")
@@ -745,7 +787,8 @@ def _handle_pushstate(data):
             elif current_screen not in ("idle", "transition_to_pause"):
                 _set_screen_unsafe("idle")
         elif state == "stop":
-            if current_screen not in ("loading", "idle", "transition_to_pause", "transition_to_play"):
+            if current_screen not in ("loading", "idle", "screen_off",
+                                      "transition_to_pause", "transition_to_play"):
                 _set_screen_unsafe("loading")
 
 

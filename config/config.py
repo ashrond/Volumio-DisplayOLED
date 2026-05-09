@@ -85,8 +85,12 @@ for noisy in ("engineio", "engineio.client", "socketio", "socketio.client", "url
 _timing = config.get("timing", {})
 PLAYBACK_REFRESH_SECONDS = float(_timing.get("playback_refresh_seconds", 1.0))
 VOLUME_HOLD_SECONDS = float(_timing.get("volume_hold_seconds", 1.5))
-IDLE_AFTER_STOP_SECONDS = float(_timing.get("idle_after_stop_seconds", 8.0))
+IDLE_AFTER_STOP_SECONDS = float(_timing.get("idle_after_stop_seconds", 300.0))
+SCREEN_OFF_AFTER_IDLE_SECONDS = float(_timing.get("screen_off_after_idle_seconds", 3600.0))
 RENDER_TICK_SECONDS = float(_timing.get("render_tick_seconds", 0.05))
+PAUSE_TO_PLAY_DEBOUNCE_SECONDS = float(_timing.get("pause_to_play_debounce_seconds", 1.5))
+TRANSITION_HOLD_AT_END_SECONDS = float(_timing.get("transition_hold_at_end_seconds", 0.5))
+TRANSITION_FADE_PORTION_CFG = float(_timing.get("transition_fade_portion", 0.22))
 # legacy
 PAUSE_ANIM_SECONDS = float(_timing.get("pause_anim_seconds", 0.6))
 IDLE_ANIM_SECONDS = float(_timing.get("idle_anim_seconds", 0.6))

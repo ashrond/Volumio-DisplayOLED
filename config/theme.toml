@@ -51,10 +51,15 @@ fade_seconds = 0.80
 
 [timing]
 # All in seconds. Tweak to taste.
-playback_refresh_seconds = 1.0     # how often the clock + progress bar re-render
-volume_hold_seconds = 1.5          # volume screen stays this long after last volume change, then -> playback
-idle_after_stop_seconds = 8.0      # transition loading -> idle if status=stop persists this long
-render_tick_seconds = 0.05         # render thread cadence (20 Hz). Lower = smoother animation, more CPU
+playback_refresh_seconds = 1.0           # how often the clock + progress bar re-render
+volume_hold_seconds = 1.5                # volume screen sticks this long after last vol change
+idle_after_stop_seconds = 300.0          # loading -> idle if status=stop persists this long (5 min)
+screen_off_after_idle_seconds = 3600.0   # idle -> screen_off (panel sleep) after this long (1 hour)
+render_tick_seconds = 0.05               # render thread cadence (20 Hz)
+# Play/pause transition timing
+pause_to_play_debounce_seconds = 1.5     # ignore play events within this window after pause (IR auto-repeat)
+transition_hold_at_end_seconds = 0.5     # hold last GIF frame before fade-out
+transition_fade_portion = 0.22           # symbol fade-in/out as fraction of total transition
 # legacy knobs (kept for the disconnect-loading screen which still runs blocking)
 loading_anim_seconds = 3.0
 pause_anim_seconds = 0.6
