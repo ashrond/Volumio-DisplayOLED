@@ -40,7 +40,7 @@ from config.config import (
     MENU_TIMEOUT_SECONDS, MENU_IR_UDP_PORT,
 )
 from screens.startup import display_startup
-from screens.playback import display_playback_screen
+from screens.playback import display_playback_screen, needs_marquee
 from screens import screensaver, screensaver_replay
 from screens.menu import paint_menu
 
@@ -97,6 +97,9 @@ _menu_stack_lock = threading.Lock()    # protects _menu_stack independently of s
 last_random = False
 last_repeat = False
 last_repeat_single = False
+# Service type — "webradio" means streaming (no finite duration), drives the
+# chasing-gradient indicator instead of the normal progress bar.
+last_service = ""
 # IR button event queue — populated by ir_udp_listener thread, consumed by ir_dispatcher thread.
 _ir_queue = _queue.Queue()
 
@@ -822,8 +825,16 @@ def _render_loop_inner():
             elif screen == "playback":
                 if status != "play" or title is None:
                     continue
-                # Bypass the 1Hz throttle while fading in so the blend advances.
-                if not fade_active and now - last_playback_paint < PLAYBACK_REFRESH_SECONDS:
+                # Refresh rate: marquee or streaming chasers need animation;
+                # otherwise the slow 1Hz refresh is plenty (clock + progress).
+                is_stream = (last_service == "webradio")
+                if is_stream:
+                    paint_period = 0.08          # ~12fps for chasers
+                elif needs_marquee(title):
+                    paint_period = 0.06          # ~16fps for scrolling text
+                else:
+                    paint_period = PLAYBACK_REFRESH_SECONDS
+                if not fade_active and now - last_playback_paint < paint_period:
                     continue
                 # Cold-start guard: if no play event seen yet, don't extrapolate from epoch
                 if event_wall > 0:
@@ -831,7 +842,8 @@ def _render_loop_inner():
                     seek_now = min(seek + elapsed_ms, duration * 1000.0)
                 else:
                     seek_now = seek
-                _timed_paint("playback", display_playback_screen, device, title, artist, int(seek_now), duration)
+                _timed_paint("playback", display_playback_screen, device, title, artist,
+                             int(seek_now), duration, is_stream)
                 last_playback_paint = now
 
         except Exception as e:
@@ -934,7 +946,7 @@ def on_message(data):
 def _handle_pushstate(data):
     global volume_initialized, last_volume, last_title, last_artist, last_seek, last_duration
     global last_status, last_event_wall, last_stop_wall, last_volume_event_wall, last_status_change_wall
-    global last_random, last_repeat, last_repeat_single
+    global last_random, last_repeat, last_repeat_single, last_service
 
     state = data.get("status", "")
     title = data.get("title", "Unknown")
@@ -943,10 +955,11 @@ def _handle_pushstate(data):
     volume = _coerce_int(raw_volume, None) if raw_volume is not None else None
     seek = _coerce_int(data.get("seek"), 0)
     duration = _coerce_int(data.get("duration"), 1) or 1
-    # Mirror Volumio's shuffle/repeat state for the menu labels
+    # Mirror Volumio's shuffle/repeat/service state
     last_random = bool(data.get("random", False))
     last_repeat = bool(data.get("repeat", False))
     last_repeat_single = bool(data.get("repeatSingle", False))
+    last_service = str(data.get("service", "") or "")
 
     # Raw dump only when DEBUG, and outside the lock — json.dumps is expensive
     # and used to hold the state_lock unnecessarily.
