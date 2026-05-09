@@ -15,6 +15,8 @@ import socket
 import subprocess
 import queue as _queue
 import threading
+import urllib.request
+import urllib.parse
 import socketio
 import json
 import logging
@@ -82,44 +84,227 @@ _idle_entered_perf = 0.0
 _screen_off_entered_perf = 0.0
 _screen_off_panel_hidden = False
 
-# Menu state — entered via the MENU button (KEY_MENU) on the remote.
-# Navigation: vol up/down move selection, play selects, menu closes.
-# Auto-exits after MENU_TIMEOUT_SECONDS of no input.
+# --- Menu system ---
+# Stack-based: top-level menu pushes submenus, MENU button pops back, closes
+# when popping past the root. Each menu PAGE has items (label_fn_or_str,
+# on_select callable) and a current selected_idx.
 _menu_entered_perf = 0.0
-_menu_last_input_perf = 0.0    # any button resets the timeout
-_menu_pre_screen = "playback"  # screen we were on before the menu opened
-_menu_selected_idx = 0
-# Top-level menu items: (display_label_fn, action_id)
-# display_label_fn returns the label string (may include current state e.g. "Shuffle: ON")
-# Stubs for items not yet implemented show "(coming soon)".
-def _label_tracks():     return "Tracks"
-def _label_playlists():  return "Playlists"
-def _label_webradio():   return "Webradio"
-def _label_shuffle():    return "Shuffle: " + ("ON" if last_random else "OFF")
-def _label_repeat():
-    if last_repeat_single: return "Repeat: Single"
-    if last_repeat:        return "Repeat: All"
-    return "Repeat: Off"
-def _label_bluetooth():  return "Bluetooth"
-def _label_reboot():     return "Reboot"
-def _label_close():      return "Close"
-MENU_ITEMS = [
-    (_label_tracks,    "tracks_submenu"),
-    (_label_playlists, "playlists_submenu"),
-    (_label_webradio,  "webradio_submenu"),
-    (_label_shuffle,   "toggle_shuffle"),
-    (_label_repeat,    "toggle_repeat"),
-    (_label_bluetooth, "bluetooth_submenu"),
-    (_label_reboot,    "reboot_action"),
-    (_label_close,     "close_menu"),
-]
-# Volumio-side state we mirror for the menu labels.
+_menu_last_input_perf = 0.0
+_menu_pre_screen = "playback"
+_menu_stack = []                       # list of MenuPage (top-of-stack is the current page)
+_menu_stack_lock = threading.Lock()    # protects _menu_stack independently of state_lock
+# Mirror Volumio-side state for the menu labels (updated in pushState handler)
 last_random = False
 last_repeat = False
 last_repeat_single = False
-
 # IR button event queue — populated by ir_udp_listener thread, consumed by ir_dispatcher thread.
 _ir_queue = _queue.Queue()
+
+
+class _MenuPage:
+    __slots__ = ("items", "title", "selected_idx")
+    def __init__(self, items, title, selected_idx=0):
+        self.items = items          # list of (label_or_callable, on_select_callable_or_None)
+        self.title = title
+        self.selected_idx = selected_idx
+
+
+def _http_get(path, timeout=2.0):
+    """Synchronous GET against Volumio's REST API. Returns parsed JSON or raises."""
+    url = "http://localhost:3000" + path
+    with urllib.request.urlopen(url, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _label_for(item):
+    """Resolve a menu item's label (callable or string)."""
+    label = item[0]
+    return label() if callable(label) else label
+
+
+def _menu_current_page():
+    with _menu_stack_lock:
+        return _menu_stack[-1] if _menu_stack else None
+
+
+def _menu_set_screen(name):
+    """Switch the global screen state, briefly acquiring state_lock."""
+    with state_lock:
+        _set_screen_unsafe(name)
+
+
+def _menu_close():
+    """Close the menu entirely and return to the screen we came from."""
+    with _menu_stack_lock:
+        _menu_stack.clear()
+    _menu_set_screen(_menu_pre_screen or "playback")
+
+
+def _menu_pop():
+    """Go back one level. If at top, close the menu."""
+    with _menu_stack_lock:
+        if len(_menu_stack) > 1:
+            _menu_stack.pop()
+            still_open = True
+        else:
+            _menu_stack.clear()
+            still_open = False
+    if still_open:
+        global _menu_last_input_perf
+        _menu_last_input_perf = time.perf_counter()
+        render_wake.set()
+    else:
+        _menu_set_screen(_menu_pre_screen or "playback")
+
+
+def _menu_push(page):
+    with _menu_stack_lock:
+        _menu_stack.append(page)
+    global _menu_last_input_perf
+    _menu_last_input_perf = time.perf_counter()
+    render_wake.set()
+
+
+def _menu_open_tracks():
+    """Fetch current queue, push as submenu."""
+    try:
+        data = _http_get("/api/v1/getQueue")
+        queue = data.get("queue", []) if isinstance(data, dict) else []
+    except Exception as e:
+        log.warning("fetch queue failed: %s", e)
+        return
+    items = []
+    for idx, track in enumerate(queue):
+        name = track.get("name") or track.get("title") or f"Track {idx+1}"
+        items.append((name, _menu_make_jump_to_queue(idx)))
+    if not items:
+        items.append(("(queue is empty)", None))
+    items.append(("< Back", _menu_pop))
+    _menu_push(_MenuPage(items, "Tracks"))
+
+
+def _menu_make_jump_to_queue(idx):
+    def action():
+        try:
+            sio.emit("stop")
+            sio.emit("play", {"value": idx})
+        except Exception as e:
+            log.warning("jump to queue idx %d failed: %s", idx, e)
+        _menu_close()
+    return action
+
+
+def _menu_open_playlists():
+    """Fetch saved playlists, push as submenu."""
+    try:
+        playlists = _http_get("/api/v1/listplaylists")
+        if not isinstance(playlists, list):
+            playlists = []
+    except Exception as e:
+        log.warning("fetch playlists failed: %s", e)
+        return
+    items = []
+    for name in playlists:
+        items.append((str(name), _menu_make_play_playlist(str(name))))
+    if not items:
+        items.append(("(no saved playlists)", None))
+    items.append(("< Back", _menu_pop))
+    _menu_push(_MenuPage(items, "Playlists"))
+
+
+def _menu_make_play_playlist(name):
+    def action():
+        try:
+            sio.emit("playPlaylist", {"name": name})
+        except Exception as e:
+            log.warning("playPlaylist %s failed: %s", name, e)
+        _menu_close()
+    return action
+
+
+def _menu_open_webradio():
+    """Fetch user's saved web radios, push as submenu.
+    Tries /api/v1/browse?uri=radio/myWebRadio first, falls back to favourites."""
+    items_data = []
+    for src in ("radio/myWebRadio", "radio/favourites"):
+        try:
+            data = _http_get("/api/v1/browse?" + urllib.parse.urlencode({"uri": src}))
+            for lst in data.get("navigation", {}).get("lists", []):
+                for itm in lst.get("items", []):
+                    items_data.append(itm)
+        except Exception as e:
+            log.debug("fetch webradio %s failed: %s", src, e)
+    items = []
+    for itm in items_data:
+        title = itm.get("title") or itm.get("name") or "Unknown"
+        items.append((title, _menu_make_play_uri(itm)))
+    if not items:
+        items.append(("(no saved web radios)", None))
+    items.append(("< Back", _menu_pop))
+    _menu_push(_MenuPage(items, "Webradio"))
+
+
+def _menu_make_play_uri(item):
+    def action():
+        try:
+            sio.emit("replaceAndPlay", item)
+        except Exception as e:
+            log.warning("replaceAndPlay failed: %s", e)
+        _menu_close()
+    return action
+
+
+def _menu_action_toggle_shuffle():
+    global last_random
+    new_val = not last_random
+    try:
+        sio.emit("setRandom", {"value": new_val})
+        last_random = new_val
+    except Exception as e:
+        log.warning("toggle shuffle failed: %s", e)
+
+
+def _menu_action_toggle_repeat():
+    global last_repeat, last_repeat_single
+    if not last_repeat and not last_repeat_single:
+        new_repeat, new_single = True, False
+    elif last_repeat and not last_repeat_single:
+        new_repeat, new_single = True, True
+    else:
+        new_repeat, new_single = False, False
+    try:
+        sio.emit("setRepeat", {"value": new_repeat, "repeatSingle": new_single})
+        last_repeat, last_repeat_single = new_repeat, new_single
+    except Exception as e:
+        log.warning("toggle repeat failed: %s", e)
+
+
+def _menu_action_reboot():
+    log.warning("MENU: reboot requested")
+    try:
+        subprocess.Popen(["sudo", "/sbin/reboot"],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception as e:
+        log.error("reboot failed: %s", e)
+
+
+def _menu_open_bluetooth_stub():
+    items = [("(coming soon)", None), ("< Back", _menu_pop)]
+    _menu_push(_MenuPage(items, "Bluetooth"))
+
+
+def _build_top_level_menu():
+    return [
+        ("Tracks",                                                       _menu_open_tracks),
+        ("Playlists",                                                    _menu_open_playlists),
+        ("Webradio",                                                     _menu_open_webradio),
+        (lambda: "Shuffle: " + ("ON" if last_random else "OFF"),         _menu_action_toggle_shuffle),
+        (lambda: ("Repeat: Single" if last_repeat_single
+                  else "Repeat: All" if last_repeat else "Repeat: Off"), _menu_action_toggle_repeat),
+        ("Bluetooth",                                                    _menu_open_bluetooth_stub),
+        ("Reboot",                                                       _menu_action_reboot),
+        ("Close",                                                        _menu_close),
+    ]
 # Fade state: (start_perf, duration, prev_image, new_image_or_None)
 # new_image is captured on the FIRST paint after the fade starts, then frozen
 # so we blend two static frames smoothly. Without this freeze, the fade would
@@ -610,8 +795,11 @@ def _render_loop_inner():
                         transition_idx = sym_idx
 
             elif screen == "menu":
-                items = [label_fn() for label_fn, _ in MENU_ITEMS]
-                paint_menu(device, items=items, selected_idx=_menu_selected_idx)
+                page = _menu_current_page()
+                if page is not None:
+                    items = [_label_for(it) for it in page.items]
+                    paint_menu(device, items=items, selected_idx=page.selected_idx,
+                               title=page.title)
 
             elif screen == "screen_off":
                 # Render an all-black frame for the fade duration so the
@@ -931,75 +1119,46 @@ def _shutdown(signum, _frame):
 
 
 def _open_menu():
-    """Switch to the menu screen. Caller must hold state_lock."""
-    global _menu_pre_screen, _menu_entered_perf, _menu_last_input_perf, _menu_selected_idx
-    _menu_pre_screen = current_screen if current_screen != "menu" else _menu_pre_screen
-    _menu_selected_idx = 0
+    """Open the top-level menu and switch screen state."""
+    global _menu_pre_screen, _menu_entered_perf, _menu_last_input_perf
+    with state_lock:
+        if current_screen != "menu":
+            _menu_pre_screen = current_screen
+    with _menu_stack_lock:
+        _menu_stack.clear()
+        _menu_stack.append(_MenuPage(_build_top_level_menu(), "Menu"))
     _menu_entered_perf = time.perf_counter()
     _menu_last_input_perf = _menu_entered_perf
     log.info("menu: opening (return to %s on exit)", _menu_pre_screen)
-    _set_screen_unsafe("menu")
-
-
-def _close_menu():
-    """Exit the menu screen back to the previous one. Caller must hold state_lock."""
-    log.info("menu: closing -> %s", _menu_pre_screen)
-    _set_screen_unsafe(_menu_pre_screen or "playback")
-
-
-def _menu_select():
-    """Execute the action for the currently-highlighted menu item. Caller must hold state_lock."""
-    global last_random, last_repeat, last_repeat_single
-    label_fn, action = MENU_ITEMS[_menu_selected_idx]
-    log.info("menu select: %s (action=%s)", label_fn(), action)
-    if action == "close_menu":
-        _close_menu()
-    elif action == "toggle_shuffle":
-        new_val = not last_random
-        try:
-            sio.emit("setRandom", {"value": new_val})
-            last_random = new_val
-        except Exception as e:
-            log.warning("toggle shuffle failed: %s", e)
-    elif action == "toggle_repeat":
-        # Cycle: Off -> All -> Single -> Off
-        if not last_repeat and not last_repeat_single:
-            new_repeat, new_single = True, False
-        elif last_repeat and not last_repeat_single:
-            new_repeat, new_single = True, True
-        else:
-            new_repeat, new_single = False, False
-        try:
-            sio.emit("setRepeat", {"value": new_repeat, "repeatSingle": new_single})
-            last_repeat, last_repeat_single = new_repeat, new_single
-        except Exception as e:
-            log.warning("toggle repeat failed: %s", e)
-    elif action == "reboot_action":
-        log.warning("MENU: reboot requested")
-        try:
-            subprocess.Popen(["sudo", "/sbin/reboot"],
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except Exception as e:
-            log.error("reboot failed: %s", e)
-    elif action in ("tracks_submenu", "playlists_submenu", "webradio_submenu", "bluetooth_submenu"):
-        # TODO phase 2/3 — for now just close
-        log.info("submenu '%s' not yet implemented", action)
-        _close_menu()
+    _menu_set_screen("menu")
 
 
 def _menu_button(button):
-    """Handle a button while the menu screen is showing. Caller must hold state_lock."""
-    global _menu_selected_idx, _menu_last_input_perf
-    n = len(MENU_ITEMS)
+    """Handle a button while the menu screen is showing.
+    Does NOT hold state_lock when invoking actions — actions may do HTTP."""
+    global _menu_last_input_perf
+    page = _menu_current_page()
+    if page is None:
+        # Menu somehow lost its stack; close.
+        _menu_close()
+        return
     if button == "KEY_MENU":
-        _close_menu()
+        _menu_pop()      # back, or close if at top
         return
     if button == "KEY_UP":
-        _menu_selected_idx = (_menu_selected_idx - 1) % n
+        with _menu_stack_lock:
+            page.selected_idx = (page.selected_idx - 1) % len(page.items)
     elif button == "KEY_DOWN":
-        _menu_selected_idx = (_menu_selected_idx + 1) % n
+        with _menu_stack_lock:
+            page.selected_idx = (page.selected_idx + 1) % len(page.items)
     elif button == "KEY_PLAY":
-        _menu_select()
+        with _menu_stack_lock:
+            item = page.items[page.selected_idx] if page.items else None
+        if item:
+            log.info("menu select: %s", _label_for(item))
+            action = item[1]
+            if action is not None:
+                action()
         return
     else:
         return
@@ -1010,8 +1169,9 @@ def _menu_button(button):
 def _forward_to_volumio(button):
     """When the menu is closed, replicate the original lircrc behavior."""
     if button == "KEY_MENU":
-        with state_lock:
-            _open_menu()
+        # _open_menu() acquires state_lock internally — DO NOT wrap here
+        # (threading.Lock is non-reentrant; re-acquire would deadlock).
+        _open_menu()
         return
     cmds = {
         "KEY_PLAY": ["toggle"],
@@ -1042,8 +1202,8 @@ def _ir_dispatcher_thread():
         with state_lock:
             in_menu = (current_screen == "menu")
         if in_menu:
-            with state_lock:
-                _menu_button(button)
+            # Don't hold state_lock — menu actions may do HTTP fetches.
+            _menu_button(button)
         else:
             _forward_to_volumio(button)
 
