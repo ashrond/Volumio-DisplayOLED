@@ -12,6 +12,8 @@ import sys
 import time
 import signal
 import socket
+import subprocess
+import queue as _queue
 import threading
 import socketio
 import json
@@ -33,10 +35,12 @@ from config.config import (
     SCREENSAVER_MODE, SCREENSAVER_TARGET_POPULATION, SCREENSAVER_SPAWN_RATE,
     SCREENSAVER_MEDIAN_SPEED, SCREENSAVER_DRIFT_X, SCREENSAVER_DRIFT_Y,
     FADE_SECONDS,
+    MENU_TIMEOUT_SECONDS, MENU_IR_UDP_PORT,
 )
 from screens.startup import display_startup
 from screens.playback import display_playback_screen
 from screens import screensaver, screensaver_replay
+from screens.menu import paint_menu
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 GIF_PATH_IDLE = os.path.join(_HERE, "assets/idle.gif")
@@ -77,6 +81,45 @@ TRANSITION_FADE_PORTION = TRANSITION_FADE_PORTION_CFG
 _idle_entered_perf = 0.0
 _screen_off_entered_perf = 0.0
 _screen_off_panel_hidden = False
+
+# Menu state — entered via the MENU button (KEY_MENU) on the remote.
+# Navigation: vol up/down move selection, play selects, menu closes.
+# Auto-exits after MENU_TIMEOUT_SECONDS of no input.
+_menu_entered_perf = 0.0
+_menu_last_input_perf = 0.0    # any button resets the timeout
+_menu_pre_screen = "playback"  # screen we were on before the menu opened
+_menu_selected_idx = 0
+# Top-level menu items: (display_label_fn, action_id)
+# display_label_fn returns the label string (may include current state e.g. "Shuffle: ON")
+# Stubs for items not yet implemented show "(coming soon)".
+def _label_tracks():     return "Tracks"
+def _label_playlists():  return "Playlists"
+def _label_webradio():   return "Webradio"
+def _label_shuffle():    return "Shuffle: " + ("ON" if last_random else "OFF")
+def _label_repeat():
+    if last_repeat_single: return "Repeat: Single"
+    if last_repeat:        return "Repeat: All"
+    return "Repeat: Off"
+def _label_bluetooth():  return "Bluetooth"
+def _label_reboot():     return "Reboot"
+def _label_close():      return "Close"
+MENU_ITEMS = [
+    (_label_tracks,    "tracks_submenu"),
+    (_label_playlists, "playlists_submenu"),
+    (_label_webradio,  "webradio_submenu"),
+    (_label_shuffle,   "toggle_shuffle"),
+    (_label_repeat,    "toggle_repeat"),
+    (_label_bluetooth, "bluetooth_submenu"),
+    (_label_reboot,    "reboot_action"),
+    (_label_close,     "close_menu"),
+]
+# Volumio-side state we mirror for the menu labels.
+last_random = False
+last_repeat = False
+last_repeat_single = False
+
+# IR button event queue — populated by ir_udp_listener thread, consumed by ir_dispatcher thread.
+_ir_queue = _queue.Queue()
 # Fade state: (start_perf, duration, prev_image, new_image_or_None)
 # new_image is captured on the FIRST paint after the fade starts, then frozen
 # so we blend two static frames smoothly. Without this freeze, the fade would
@@ -400,6 +443,16 @@ def _render_loop_inner():
                     _set_screen_unsafe("idle")
             continue
 
+        # Auto-transition: menu auto-closes after MENU_TIMEOUT_SECONDS of no input
+        if (screen == "menu" and _menu_last_input_perf > 0
+                and time.perf_counter() - _menu_last_input_perf > MENU_TIMEOUT_SECONDS):
+            with state_lock:
+                if current_screen == "menu":
+                    log.info("menu auto-close (>%.1fs idle), -> %s",
+                             MENU_TIMEOUT_SECONDS, _menu_pre_screen)
+                    _set_screen_unsafe(_menu_pre_screen or "playback")
+            continue
+
         # Auto-transition: idle has been showing for too long → fade to black + sleep panel
         if (screen == "idle" and _idle_entered_perf > 0
                 and SCREEN_OFF_AFTER_IDLE_SECONDS > 0
@@ -426,6 +479,9 @@ def _render_loop_inner():
                     screensaver_replay.reset()
             elif screen == "screen_off":
                 _screen_off_entered_perf = time.perf_counter()
+            elif screen == "menu":
+                # _menu_entered_perf is set in _open_menu(); nothing to reset here
+                pass
             elif screen == "loading":
                 loading_idx = 0
                 last_loading_paint = 0
@@ -552,6 +608,10 @@ def _render_loop_inner():
                                      frames[sym_idx], behind,
                                      _transition_ahead_img, progress, symbol_env)
                         transition_idx = sym_idx
+
+            elif screen == "menu":
+                items = [label_fn() for label_fn, _ in MENU_ITEMS]
+                paint_menu(device, items=items, selected_idx=_menu_selected_idx)
 
             elif screen == "screen_off":
                 # Render an all-black frame for the fade duration so the
@@ -686,6 +746,7 @@ def on_message(data):
 def _handle_pushstate(data):
     global volume_initialized, last_volume, last_title, last_artist, last_seek, last_duration
     global last_status, last_event_wall, last_stop_wall, last_volume_event_wall, last_status_change_wall
+    global last_random, last_repeat, last_repeat_single
 
     state = data.get("status", "")
     title = data.get("title", "Unknown")
@@ -694,6 +755,10 @@ def _handle_pushstate(data):
     volume = _coerce_int(raw_volume, None) if raw_volume is not None else None
     seek = _coerce_int(data.get("seek"), 0)
     duration = _coerce_int(data.get("duration"), 1) or 1
+    # Mirror Volumio's shuffle/repeat state for the menu labels
+    last_random = bool(data.get("random", False))
+    last_repeat = bool(data.get("repeat", False))
+    last_repeat_single = bool(data.get("repeatSingle", False))
 
     # Raw dump only when DEBUG, and outside the lock — json.dumps is expensive
     # and used to hold the state_lock unnecessarily.
@@ -767,6 +832,10 @@ def _handle_pushstate(data):
         #   idle     -[play]--> transition_to_play  -[done]-> playback
         #   playback -[stop]--> loading -[stop persists]-> idle
         #   loading  -[play]--> playback (no transition; track-skip in progress)
+        # Menu owns the screen while open — don't auto-switch on incidental
+        # state changes (e.g. track auto-advance during menu interaction).
+        if current_screen == "menu":
+            return
         if volume_event:
             if current_screen != "volume":
                 _set_screen_unsafe("volume")
@@ -861,6 +930,150 @@ def _shutdown(signum, _frame):
         log.warning("sio.disconnect during shutdown: %s", e)
 
 
+def _open_menu():
+    """Switch to the menu screen. Caller must hold state_lock."""
+    global _menu_pre_screen, _menu_entered_perf, _menu_last_input_perf, _menu_selected_idx
+    _menu_pre_screen = current_screen if current_screen != "menu" else _menu_pre_screen
+    _menu_selected_idx = 0
+    _menu_entered_perf = time.perf_counter()
+    _menu_last_input_perf = _menu_entered_perf
+    log.info("menu: opening (return to %s on exit)", _menu_pre_screen)
+    _set_screen_unsafe("menu")
+
+
+def _close_menu():
+    """Exit the menu screen back to the previous one. Caller must hold state_lock."""
+    log.info("menu: closing -> %s", _menu_pre_screen)
+    _set_screen_unsafe(_menu_pre_screen or "playback")
+
+
+def _menu_select():
+    """Execute the action for the currently-highlighted menu item. Caller must hold state_lock."""
+    global last_random, last_repeat, last_repeat_single
+    label_fn, action = MENU_ITEMS[_menu_selected_idx]
+    log.info("menu select: %s (action=%s)", label_fn(), action)
+    if action == "close_menu":
+        _close_menu()
+    elif action == "toggle_shuffle":
+        new_val = not last_random
+        try:
+            sio.emit("setRandom", {"value": new_val})
+            last_random = new_val
+        except Exception as e:
+            log.warning("toggle shuffle failed: %s", e)
+    elif action == "toggle_repeat":
+        # Cycle: Off -> All -> Single -> Off
+        if not last_repeat and not last_repeat_single:
+            new_repeat, new_single = True, False
+        elif last_repeat and not last_repeat_single:
+            new_repeat, new_single = True, True
+        else:
+            new_repeat, new_single = False, False
+        try:
+            sio.emit("setRepeat", {"value": new_repeat, "repeatSingle": new_single})
+            last_repeat, last_repeat_single = new_repeat, new_single
+        except Exception as e:
+            log.warning("toggle repeat failed: %s", e)
+    elif action == "reboot_action":
+        log.warning("MENU: reboot requested")
+        try:
+            subprocess.Popen(["sudo", "/sbin/reboot"],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception as e:
+            log.error("reboot failed: %s", e)
+    elif action in ("tracks_submenu", "playlists_submenu", "webradio_submenu", "bluetooth_submenu"):
+        # TODO phase 2/3 — for now just close
+        log.info("submenu '%s' not yet implemented", action)
+        _close_menu()
+
+
+def _menu_button(button):
+    """Handle a button while the menu screen is showing. Caller must hold state_lock."""
+    global _menu_selected_idx, _menu_last_input_perf
+    n = len(MENU_ITEMS)
+    if button == "KEY_MENU":
+        _close_menu()
+        return
+    if button == "KEY_UP":
+        _menu_selected_idx = (_menu_selected_idx - 1) % n
+    elif button == "KEY_DOWN":
+        _menu_selected_idx = (_menu_selected_idx + 1) % n
+    elif button == "KEY_PLAY":
+        _menu_select()
+        return
+    else:
+        return
+    _menu_last_input_perf = time.perf_counter()
+    render_wake.set()
+
+
+def _forward_to_volumio(button):
+    """When the menu is closed, replicate the original lircrc behavior."""
+    if button == "KEY_MENU":
+        with state_lock:
+            _open_menu()
+        return
+    cmds = {
+        "KEY_PLAY": ["toggle"],
+        "KEY_RIGHT": ["next"],
+        "KEY_LEFT": ["previous"],
+        "KEY_UP": ["volume", "plus"],
+        "KEY_DOWN": ["volume", "minus"],
+    }
+    cmd = cmds.get(button)
+    if not cmd:
+        return
+    try:
+        subprocess.Popen(["/usr/local/bin/volumio"] + cmd,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception as e:
+        log.warning("forward_to_volumio %s: %s", button, e)
+
+
+def _ir_dispatcher_thread():
+    """Consume IR button events from the queue and route them based on screen state."""
+    log.info("ir dispatcher started")
+    while not shutdown_event.is_set():
+        try:
+            button = _ir_queue.get(timeout=0.5)
+        except _queue.Empty:
+            continue
+        log.debug("ir button: %s", button)
+        with state_lock:
+            in_menu = (current_screen == "menu")
+        if in_menu:
+            with state_lock:
+                _menu_button(button)
+        else:
+            _forward_to_volumio(button)
+
+
+def _ir_udp_listener_thread():
+    """Receive IR button names over UDP from tools/ir_dispatch.sh."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.bind(("127.0.0.1", MENU_IR_UDP_PORT))
+    except OSError as e:
+        log.error("ir UDP bind failed on %d: %s", MENU_IR_UDP_PORT, e)
+        return
+    sock.settimeout(0.5)
+    log.info("ir UDP listener bound on 127.0.0.1:%d", MENU_IR_UDP_PORT)
+    while not shutdown_event.is_set():
+        try:
+            data, _ = sock.recvfrom(64)
+            button = data.decode("utf-8", errors="replace").strip()
+            if button:
+                _ir_queue.put(button)
+        except socket.timeout:
+            continue
+        except Exception as e:
+            log.warning("ir UDP listener: %s", e)
+    try:
+        sock.close()
+    except Exception:
+        pass
+
+
 if __name__ == "__main__":
     signal.signal(signal.SIGTERM, _shutdown)
     signal.signal(signal.SIGINT, _shutdown)
@@ -888,6 +1101,10 @@ if __name__ == "__main__":
     render_thread = threading.Thread(target=render_loop, daemon=False)
     render_thread.start()
     threading.Thread(target=watchdog_thread, daemon=True).start()
+    # IR remote routing: UDP listener + dispatcher. tools/ir_dispatch.sh sends
+    # button names here; dispatcher routes them to menu nav or to Volumio.
+    threading.Thread(target=_ir_udp_listener_thread, daemon=True).start()
+    threading.Thread(target=_ir_dispatcher_thread, daemon=True).start()
 
     # Self-healing wait loop. python-socketio's auto-reconnect handles flaps,
     # but if sio.wait() ever returns (library exhausted, fatal error), don't

@@ -42,6 +42,12 @@ max = 20
 # no seek jump) filter out unrelated periodic events even with a wide window.
 button_recent_window = 30.0
 
+[menu]
+# How long the menu stays open with no input before auto-closing.
+timeout_seconds = 15.0
+# UDP port the display listens on for IR button events from tools/ir_dispatch.sh.
+ir_udp_port = 9876
+
 [transitions]
 # Crossfade duration when changing between display states (e.g. playback to
 # volume, idle to playback). Set to 0 to disable.

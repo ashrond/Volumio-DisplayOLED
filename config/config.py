@@ -106,6 +106,11 @@ except (ValueError, TypeError):
     VOLUME_MAX = 100
 VOLUME_BUTTON_RECENT_WINDOW = float(_volume_cfg.get("button_recent_window", 3.0))
 
+# --- Menu ---
+_menu_cfg = config.get("menu", {})
+MENU_TIMEOUT_SECONDS = float(_menu_cfg.get("timeout_seconds", 15.0))
+MENU_IR_UDP_PORT = int(_menu_cfg.get("ir_udp_port", 9876))
+
 # --- Transitions ---
 _trans_cfg = config.get("transitions", {})
 FADE_SECONDS = float(_trans_cfg.get("fade_seconds", 0.15))
