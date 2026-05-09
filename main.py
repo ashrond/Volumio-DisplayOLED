@@ -19,7 +19,7 @@ import logging
 from luma.core.interface.serial import spi
 from luma.oled.device import ssd1322
 from luma.core.render import canvas
-from PIL import Image, ImageSequence
+from PIL import Image, ImageSequence, ImageDraw
 
 from config.config import (
     log,
@@ -34,8 +34,11 @@ from screens.startup import display_startup
 from screens.playback import display_playback_screen
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-GIF_PATH_PAUSE = os.path.join(_HERE, "assets/pause.gif")
 GIF_PATH_IDLE = os.path.join(_HERE, "assets/idle.gif")
+GIF_PATH_PLAY_TO_PAUSE = os.path.join(_HERE, "assets/play-to-pause.gif")
+GIF_PATH_PAUSE_TO_PLAY = os.path.join(_HERE, "assets/pause-to-play.gif")
+# Note: pause.gif is intentionally retired; idle.gif is now the universal
+# screensaver content for both pause and stop states.
 VOLUMIO_WS_URL = "http://localhost:3000"
 
 # Animated screens advance one GIF frame per this interval (10fps). Render tick is faster
@@ -43,6 +46,9 @@ VOLUMIO_WS_URL = "http://localhost:3000"
 GIF_FRAME_PERIOD = 0.1
 
 # --- SPI device ---
+# SSD1322 supports 4-bit (16-level) grayscale. Default luma mode is "RGB"
+# which is then mapped down to grayscale at display time. Keep this — DO NOT
+# convert frames to mode "1" (1-bit) on load; that throws away all gradient.
 serial = spi(device=0, port=0, bus_speed_hz=8000000)
 device = ssd1322(serial)
 
@@ -79,6 +85,8 @@ _frame_cache = {}
 
 
 def _load_frames(path, resize_to_screen):
+    """Decode every frame of a GIF into PIL Images in the device's native mode
+    (preserves grayscale). Resize uses LANCZOS for high-quality downsampling."""
     if path in _frame_cache:
         return _frame_cache[path]
     if not os.path.exists(path):
@@ -87,24 +95,35 @@ def _load_frames(path, resize_to_screen):
         return []
     try:
         with Image.open(path) as gif:
-            if resize_to_screen:
-                frames = [f.convert("1").resize((device.width, device.height)) for f in ImageSequence.Iterator(gif)]
-            else:
-                frames = [f.convert("1") for f in ImageSequence.Iterator(gif)]
+            frames = []
+            for f in ImageSequence.Iterator(gif):
+                # Convert in the GIF's own palette space first to compose any
+                # transparency cleanly, THEN to the device's mode so paste()
+                # later is a direct copy (no per-paint conversion cost).
+                frame = f.convert(device.mode)
+                if resize_to_screen and frame.size != (device.width, device.height):
+                    frame = frame.resize((device.width, device.height), Image.LANCZOS)
+                frames.append(frame)
     except Exception as e:
         log.error("failed to load GIF %s: %s", path, e)
         _frame_cache[path] = []
         return []
     _frame_cache[path] = frames
-    log.info("loaded %d frames from %s", len(frames), os.path.basename(path))
+    log.info("loaded %d frames from %s (mode=%s, size=%dx%d)",
+             len(frames), os.path.basename(path),
+             frames[0].mode if frames else "?",
+             frames[0].size[0] if frames else 0,
+             frames[0].size[1] if frames else 0)
     return frames
 
 
 def _prewarm_gifs():
-    """Decode all animated GIFs into memory at startup, so first-use paints don't stall."""
+    """Decode all animated GIFs into memory at startup, so first-use paints don't stall.
+    Cache key is path-only, so the resize_to_screen flag here MUST match the painters'."""
     _load_frames(GIF_PATH_LOADING, resize_to_screen=True)
-    _load_frames(GIF_PATH_PAUSE, resize_to_screen=False)
-    _load_frames(GIF_PATH_IDLE, resize_to_screen=False)
+    _load_frames(GIF_PATH_IDLE, resize_to_screen=True)
+    _load_frames(GIF_PATH_PLAY_TO_PAUSE, resize_to_screen=True)
+    _load_frames(GIF_PATH_PAUSE_TO_PLAY, resize_to_screen=True)
 
 
 def _coerce_int(v, default):
@@ -140,36 +159,38 @@ def _paint_loading(idx, error=""):
     if not frames:
         return
     f = frames[idx % len(frames)]
-    with canvas(device) as draw:
-        draw.bitmap((0, 0), f, fill="white")
-        text = "LOADING"
-        tw = font_title.getbbox(text)[2]
-        tx = (device.width - tw) // 2
-        draw.text((tx, 0), text, font=font_title, fill=text_color)
-        if error:
-            ew = font_artist.getbbox(error)[2]
-            ex = (device.width - ew) // 2
-            draw.text((ex, device.height - 12), error, font=font_artist, fill=text_color)
-
-
-def _paint_pause(idx):
-    frames = _load_frames(GIF_PATH_PAUSE, resize_to_screen=False)
-    if not frames:
-        return
-    f = frames[idx % len(frames)]
-    x = (device.width - f.size[0]) // 2
-    y = (device.height - f.size[1]) // 2
-    with canvas(device) as draw:
-        draw.bitmap((x, y), f, fill="white")
+    # Build the image directly in device mode so we can paste the GIF frame
+    # at full intensity (preserving grayscale), then draw text overlays on top.
+    img = Image.new(device.mode, (device.width, device.height), "black")
+    img.paste(f, (0, 0))
+    draw = ImageDraw.Draw(img)
+    text = "LOADING"
+    tw = font_title.getbbox(text)[2]
+    tx = (device.width - tw) // 2
+    draw.text((tx, 0), text, font=font_title, fill="white")
+    if error:
+        ew = font_artist.getbbox(error)[2]
+        ex = (device.width - ew) // 2
+        draw.text((ex, device.height - 12), error, font=font_artist, fill="white")
+    device.display(img)
 
 
 def _paint_idle(idx):
-    frames = _load_frames(GIF_PATH_IDLE, resize_to_screen=False)
+    """Universal screensaver — also used for the 'pause' state."""
+    frames = _load_frames(GIF_PATH_IDLE, resize_to_screen=True)
     if not frames:
         return
     f = frames[idx % len(frames)]
-    with canvas(device) as draw:
-        draw.bitmap((0, 0), f, fill="white")
+    img = Image.new(device.mode, (device.width, device.height), "black")
+    img.paste(f, (0, 0))
+    device.display(img)
+
+
+def _paint_transition_frame(frame):
+    """One-shot transition painter; just blits a pre-loaded frame."""
+    img = Image.new(device.mode, (device.width, device.height), "black")
+    img.paste(frame, (0, 0))
+    device.display(img)
 
 
 # --- Render thread ---
@@ -187,13 +208,13 @@ def render_loop():
 def _render_loop_inner():
     global last_render_tick_wall
     log.info("render loop started (tick=%.2fs, gif=%dfps)", RENDER_TICK_SECONDS, int(1.0 / GIF_FRAME_PERIOD))
-    pause_idx = 0
     idle_idx = 0
     loading_idx = 0
+    transition_idx = 0
     last_playback_paint = 0.0
-    last_pause_paint = 0.0
     last_idle_paint = 0.0
     last_loading_paint = 0.0
+    last_transition_paint = 0.0
     last_painted_screen = None
     last_painted_volume = None
     last_logged_change_perf = 0.0
@@ -224,8 +245,11 @@ def _render_loop_inner():
         if screen == "volume" and now - volume_event_wall > VOLUME_HOLD_SECONDS:
             with state_lock:
                 if current_screen == "volume":
+                    # pause/stop both map to 'idle' (same screensaver content).
+                    # We don't fire transition_to_* GIFs from here — coming back
+                    # from a brief volume tap shouldn't dramatize as sleep/wake.
                     if last_status == "pause":
-                        target = "pause"
+                        target = "idle"
                     elif last_status == "stop":
                         if last_stop_wall and (time.time() - last_stop_wall) > IDLE_AFTER_STOP_SECONDS:
                             target = "idle"
@@ -246,15 +270,15 @@ def _render_loop_inner():
 
         # Reset animation indices when entering an animated screen freshly
         if screen != last_painted_screen:
-            if screen == "pause":
-                pause_idx = 0
-                last_pause_paint = 0
-            elif screen == "idle":
+            if screen == "idle":
                 idle_idx = 0
                 last_idle_paint = 0
             elif screen == "loading":
                 loading_idx = 0
                 last_loading_paint = 0
+            elif screen in ("transition_to_pause", "transition_to_play"):
+                transition_idx = 0
+                last_transition_paint = 0
             last_painted_screen = screen
 
         if change_perf and change_perf != last_logged_change_perf:
@@ -279,17 +303,35 @@ def _render_loop_inner():
                     loading_idx += 1
                     last_loading_paint = now
 
-            elif screen == "pause":
-                if now - last_pause_paint >= GIF_FRAME_PERIOD:
-                    _timed_paint("pause", _paint_pause, pause_idx)
-                    pause_idx += 1
-                    last_pause_paint = now
-
             elif screen == "idle":
                 if now - last_idle_paint >= GIF_FRAME_PERIOD:
                     _timed_paint("idle", _paint_idle, idle_idx)
                     idle_idx += 1
                     last_idle_paint = now
+
+            elif screen == "transition_to_pause":
+                if now - last_transition_paint >= GIF_FRAME_PERIOD:
+                    frames = _load_frames(GIF_PATH_PLAY_TO_PAUSE, resize_to_screen=True)
+                    if not frames or transition_idx >= len(frames):
+                        with state_lock:
+                            if current_screen == "transition_to_pause":
+                                _set_screen_unsafe("idle")
+                    else:
+                        _timed_paint("trans-to-pause", _paint_transition_frame, frames[transition_idx])
+                        transition_idx += 1
+                        last_transition_paint = now
+
+            elif screen == "transition_to_play":
+                if now - last_transition_paint >= GIF_FRAME_PERIOD:
+                    frames = _load_frames(GIF_PATH_PAUSE_TO_PLAY, resize_to_screen=True)
+                    if not frames or transition_idx >= len(frames):
+                        with state_lock:
+                            if current_screen == "transition_to_play":
+                                _set_screen_unsafe("playback")
+                    else:
+                        _timed_paint("trans-to-play", _paint_transition_frame, frames[transition_idx])
+                        transition_idx += 1
+                        last_transition_paint = now
 
             elif screen == "playback":
                 if status != "play" or title is None:
@@ -466,23 +508,32 @@ def _handle_pushstate(data):
                     last_stop_wall = now
 
         # --- Pick target screen ---
+        # State machine:
+        #   playback -[pause]-> transition_to_pause -[done]-> idle
+        #   idle     -[play]--> transition_to_play  -[done]-> playback
+        #   playback -[stop]--> loading -[stop persists]-> idle
+        #   loading  -[play]--> playback (no transition; track-skip in progress)
         if volume_event:
             if current_screen != "volume":
                 _set_screen_unsafe("volume")
             else:
                 render_wake.set()
         elif current_screen == "volume":
-            pass
+            pass  # let render loop transition out when hold expires
         elif ignore_state_change:
             pass
         elif state == "play":
-            if current_screen != "playback":
+            if current_screen in ("idle", "transition_to_pause"):
+                _set_screen_unsafe("transition_to_play")
+            elif current_screen not in ("playback", "transition_to_play"):
                 _set_screen_unsafe("playback")
         elif state == "pause":
-            if current_screen != "pause":
-                _set_screen_unsafe("pause")
+            if current_screen in ("playback", "transition_to_play"):
+                _set_screen_unsafe("transition_to_pause")
+            elif current_screen not in ("idle", "transition_to_pause"):
+                _set_screen_unsafe("idle")
         elif state == "stop":
-            if current_screen not in ("loading", "idle"):
+            if current_screen not in ("loading", "idle", "transition_to_pause", "transition_to_play"):
                 _set_screen_unsafe("loading")
 
 
@@ -560,6 +611,7 @@ if __name__ == "__main__":
     signal.signal(signal.SIGINT, _shutdown)
 
     log.info("=== vfd starting ===")
+    log.info("device: ssd1322 mode=%s size=%dx%d", device.mode, device.width, device.height)
     _prewarm_gifs()
     _connect_with_retry()
     if shutdown_event.is_set():
