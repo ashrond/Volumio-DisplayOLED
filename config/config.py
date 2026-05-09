@@ -101,3 +101,12 @@ try:
 except (ValueError, TypeError):
     VOLUME_MAX = 100
 VOLUME_BUTTON_RECENT_WINDOW = float(_volume_cfg.get("button_recent_window", 3.0))
+
+# --- Screensaver ---
+_ss_cfg = config.get("screensaver", {})
+SCREENSAVER_MODE = str(_ss_cfg.get("mode", "procedural")).lower()
+SCREENSAVER_TARGET_POPULATION = int(_ss_cfg.get("target_population", 53))
+SCREENSAVER_SPAWN_RATE = float(_ss_cfg.get("spawn_rate", 17.6))
+SCREENSAVER_MEDIAN_SPEED = float(_ss_cfg.get("median_speed", 2.4))
+SCREENSAVER_DRIFT_X = float(_ss_cfg.get("drift_x", -0.4))
+SCREENSAVER_DRIFT_Y = float(_ss_cfg.get("drift_y", 0.0))

@@ -19,6 +19,19 @@ file = "/tmp/vfd.log"
 max_bytes = 2097152        # rotate file at 2 MB
 backup_count = 3           # keep 3 rotated logs (so total disk use is bounded to ~8 MB)
 
+[screensaver]
+# What to display in idle/pause states.
+#   "procedural" — particle simulation, never repeats (no burn-in pattern)
+#   "replay"     — programmatic replay of idle.gif blob data (visual reference)
+#   "gif"        — loops assets/idle.gif (the original)
+mode = "procedural"
+# Procedural-mode tuning (derived from idle.gif statistical fingerprint).
+target_population = 70        # avg particles on screen
+spawn_rate = 23.0             # new particles per frame
+median_speed = 5.5            # px/frame (exponential distribution); higher = faster drift
+drift_x = -0.4                # leftward drift bias
+drift_y = 0.0
+
 [volume]
 # The volume screen shows "MAX" when value reaches this number, and "MIN" at 0.
 # Set this to whatever you have configured as max in Volumio's web UI.

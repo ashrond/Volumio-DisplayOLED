@@ -29,9 +29,12 @@ from config.config import (
     PLAYBACK_REFRESH_SECONDS, VOLUME_HOLD_SECONDS,
     IDLE_AFTER_STOP_SECONDS, RENDER_TICK_SECONDS,
     VOLUME_MAX, VOLUME_BUTTON_RECENT_WINDOW,
+    SCREENSAVER_MODE, SCREENSAVER_TARGET_POPULATION, SCREENSAVER_SPAWN_RATE,
+    SCREENSAVER_MEDIAN_SPEED, SCREENSAVER_DRIFT_X, SCREENSAVER_DRIFT_Y,
 )
 from screens.startup import display_startup
 from screens.playback import display_playback_screen
+from screens import screensaver, screensaver_replay
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 GIF_PATH_IDLE = os.path.join(_HERE, "assets/idle.gif")
@@ -44,6 +47,8 @@ VOLUMIO_WS_URL = "http://localhost:3000"
 # Animated screens advance one GIF frame per this interval (10fps). Render tick is faster
 # (20Hz) for snappy state transitions, but full SPI repaints at 20Hz are wasteful.
 GIF_FRAME_PERIOD = 0.1
+# Screensaver runs faster — the source idle.gif was authored at 25fps (40ms).
+SCREENSAVER_FRAME_PERIOD = 0.04
 
 # --- SPI device ---
 # SSD1322 supports 4-bit (16-level) grayscale. Default luma mode is "RGB"
@@ -176,7 +181,22 @@ def _paint_loading(idx, error=""):
 
 
 def _paint_idle(idx):
-    """Universal screensaver — also used for the 'pause' state."""
+    """Universal screensaver — used for both pause and idle states.
+    Dispatches based on [screensaver] mode."""
+    if SCREENSAVER_MODE == "replay":
+        screensaver_replay.paint(device)
+        return
+    if SCREENSAVER_MODE == "procedural":
+        screensaver.paint(
+            device,
+            target_population=SCREENSAVER_TARGET_POPULATION,
+            spawn_rate=SCREENSAVER_SPAWN_RATE,
+            drift_x=SCREENSAVER_DRIFT_X,
+            drift_y=SCREENSAVER_DRIFT_Y,
+            median_speed=SCREENSAVER_MEDIAN_SPEED,
+        )
+        return
+    # Fallback: looping GIF
     frames = _load_frames(GIF_PATH_IDLE, resize_to_screen=True)
     if not frames:
         return
@@ -273,6 +293,10 @@ def _render_loop_inner():
             if screen == "idle":
                 idle_idx = 0
                 last_idle_paint = 0
+                # Reset both screensaver implementations so each idle entry
+                # starts fresh (procedural respawns, replay restarts at frame 0).
+                screensaver.reset()
+                screensaver_replay.reset()
             elif screen == "loading":
                 loading_idx = 0
                 last_loading_paint = 0
@@ -304,7 +328,9 @@ def _render_loop_inner():
                     last_loading_paint = now
 
             elif screen == "idle":
-                if now - last_idle_paint >= GIF_FRAME_PERIOD:
+                # Use the faster screensaver-specific period so we match the
+                # GIF's authored framerate (25fps) instead of the generic 10fps.
+                if now - last_idle_paint >= SCREENSAVER_FRAME_PERIOD:
                     _timed_paint("idle", _paint_idle, idle_idx)
                     idle_idx += 1
                     last_idle_paint = now
