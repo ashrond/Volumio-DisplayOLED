@@ -19,7 +19,7 @@ import logging
 from luma.core.interface.serial import spi
 from luma.oled.device import ssd1322
 from luma.core.render import canvas
-from PIL import Image, ImageSequence, ImageDraw
+from PIL import Image, ImageSequence, ImageDraw, ImageChops
 
 from config.config import (
     log,
@@ -31,6 +31,7 @@ from config.config import (
     VOLUME_MAX, VOLUME_BUTTON_RECENT_WINDOW,
     SCREENSAVER_MODE, SCREENSAVER_TARGET_POPULATION, SCREENSAVER_SPAWN_RATE,
     SCREENSAVER_MEDIAN_SPEED, SCREENSAVER_DRIFT_X, SCREENSAVER_DRIFT_Y,
+    FADE_SECONDS,
 )
 from screens.startup import display_startup
 from screens.playback import display_playback_screen
@@ -56,6 +57,70 @@ SCREENSAVER_FRAME_PERIOD = 0.04
 # convert frames to mode "1" (1-bit) on load; that throws away all gradient.
 serial = spi(device=0, port=0, bus_speed_hz=8000000)
 device = ssd1322(serial)
+
+# --- Screen-change crossfade ---
+# Wrap device.display() so that whenever a screen change is signaled (via
+# _start_fade() in _set_screen_unsafe), subsequent paints are blended against
+# the captured pre-change frame for FADE_SECONDS. After the fade, normal
+# display resumes. Single thread (the render thread) calls device.display,
+# so no locking needed on _last_displayed / _fade_state.
+_last_displayed = None
+_transition_behind_img = None   # snapshot of the screen we left (FROM)
+_transition_ahead_img = None    # snapshot/render of where we're going (TO) — used for static targets like playback
+_transition_start_perf = 0.0    # perf_counter at transition entry — drives the time-based progress curve
+
+# Extra time to HOLD the last frame of the play/pause symbol GIF before the
+# transition completes. Gives the symbol visual weight at peak before fading out.
+TRANSITION_HOLD_AT_END_S = 0.5
+# Symbol envelope: fade-in then hold then fade-out, expressed as fractions of
+# the total transition duration (gif_duration + TRANSITION_HOLD_AT_END_S).
+TRANSITION_FADE_PORTION = 0.22
+# Fade state: (start_perf, duration, prev_image, new_image_or_None)
+# new_image is captured on the FIRST paint after the fade starts, then frozen
+# so we blend two static frames smoothly. Without this freeze, the fade would
+# blend the old image against a shifting new image (animated screens, etc.),
+# which visually looks like "cut to noise + fade in" rather than a crossfade.
+_fade_state = None
+_device_display_orig = device.display
+
+
+def _fade_display(img):
+    global _last_displayed, _fade_state
+    if _fade_state is not None:
+        start, duration, prev_img, new_img = _fade_state
+        # Capture the first post-fade paint as the frozen target image
+        if new_img is None:
+            new_img = img.copy()
+            _fade_state = (start, duration, prev_img, new_img)
+        elapsed = time.perf_counter() - start
+        if elapsed < duration:
+            # Ease-in (quadratic): alpha grows slowly at first, then quickly.
+            # Result: previous screen lingers visible for the first portion of
+            # the fade, then drops off in the last portion. Feels like 'old
+            # holds, new arrives' rather than uniform crossfade.
+            t = elapsed / duration
+            alpha = t * t
+            try:
+                blended = Image.blend(prev_img, new_img, alpha)
+            except Exception:
+                blended = img
+                _fade_state = None
+            _device_display_orig(blended)
+            _last_displayed = blended
+            return
+        _fade_state = None
+    _device_display_orig(img)
+    _last_displayed = img
+
+
+def _start_fade():
+    """Snapshot the current display and begin a crossfade to whatever paints next."""
+    global _fade_state
+    if _last_displayed is not None and FADE_SECONDS > 0:
+        _fade_state = (time.perf_counter(), FADE_SECONDS, _last_displayed.copy(), None)
+
+
+device.display = _fade_display
 
 # --- State (mutations guarded by state_lock) ---
 state_lock = threading.Lock()
@@ -206,11 +271,50 @@ def _paint_idle(idx):
     device.display(img)
 
 
-def _paint_transition_frame(frame):
-    """One-shot transition painter; just blits a pre-loaded frame."""
+def _paint_transition_overlay(symbol_frame, behind, ahead, alpha, symbol_env):
+    """Composite a transition GIF frame OVER a primary-screen crossfade.
+
+    Layers:
+      - background: blend(behind, ahead, alpha)  — primary screens crossfading
+      - overlay:    symbol_frame * symbol_env    — lighter-blended on top, but
+                                                   intensity is scaled by an
+                                                   envelope so the symbol fades
+                                                   IN at start and OUT at end
+                                                   (no sharp pop in/out)
+    """
+    if behind is None and ahead is None:
+        bg = Image.new(device.mode, (device.width, device.height), "black")
+    elif behind is None:
+        bg = ahead
+    elif ahead is None:
+        dim = max(0, int(255 * (1.0 - alpha)))
+        bg = behind.point(lambda v, m=dim: (v * m) // 255)
+    else:
+        bg = Image.blend(behind, ahead, alpha)
+    if symbol_env >= 0.99:
+        symbol = symbol_frame
+    else:
+        scale = max(0, int(255 * symbol_env))
+        symbol = symbol_frame.point(lambda v, m=scale: (v * m) // 255)
+    composite = ImageChops.lighter(bg, symbol)
+    device.display(composite)
+
+
+def _render_playback_image():
+    """Render one playback frame to an Image without calling device.display.
+    Used as the 'ahead' target during transition_to_play."""
+    from screens.playback import draw_static_info
     img = Image.new(device.mode, (device.width, device.height), "black")
-    img.paste(frame, (0, 0))
-    device.display(img)
+    draw = ImageDraw.Draw(img)
+    title = last_title if last_title is not None else ""
+    artist = last_artist if last_artist is not None else ""
+    seek = max(0, last_seek)
+    duration = max(1, last_duration)
+    seek_seconds = seek / 1000
+    progress_percent = min(100, int((seek_seconds / duration) * 100)) if duration > 0 else 0
+    formatted_artist = f"-{artist}-" if artist else "-Unknown Artist-"
+    draw_static_info(draw, device, title, formatted_artist, progress_percent)
+    return img
 
 
 # --- Render thread ---
@@ -240,11 +344,15 @@ def _render_loop_inner():
     last_logged_change_perf = 0.0
 
     while not shutdown_event.is_set():
-        render_wake.wait(timeout=RENDER_TICK_SECONDS)
+        # During a fade, tick faster so the blend advances over multiple frames
+        # instead of one long jump. ~33ms = ~30Hz during fade.
+        wait_timeout = 0.033 if _fade_state is not None else RENDER_TICK_SECONDS
+        render_wake.wait(timeout=wait_timeout)
         render_wake.clear()
         if shutdown_event.is_set():
             break
         wake_perf = time.perf_counter()
+        fade_active = _fade_state is not None
 
         with state_lock:
             change_perf = last_screen_change_perf
@@ -293,16 +401,26 @@ def _render_loop_inner():
             if screen == "idle":
                 idle_idx = 0
                 last_idle_paint = 0
-                # Reset both screensaver implementations so each idle entry
-                # starts fresh (procedural respawns, replay restarts at frame 0).
-                screensaver.reset()
-                screensaver_replay.reset()
+                # Don't reset the screensaver when we're flowing in from
+                # transition_to_pause — its particle state was already animated
+                # in during the transition. Resetting would pop the screen back
+                # to empty and re-spawn from scratch.
+                if last_painted_screen != "transition_to_pause":
+                    screensaver.reset()
+                    screensaver_replay.reset()
             elif screen == "loading":
                 loading_idx = 0
                 last_loading_paint = 0
             elif screen in ("transition_to_pause", "transition_to_play"):
                 transition_idx = 0
                 last_transition_paint = 0
+                global _transition_behind_img, _transition_ahead_img, _transition_start_perf
+                _transition_behind_img = _last_displayed.copy() if _last_displayed is not None else None
+                _transition_ahead_img = None
+                _transition_start_perf = time.perf_counter()
+                if screen == "transition_to_pause":
+                    screensaver.reset()
+                    screensaver_replay.reset()
             last_painted_screen = screen
 
         if change_perf and change_perf != last_logged_change_perf:
@@ -317,7 +435,8 @@ def _render_loop_inner():
 
             elif screen == "volume":
                 v = volume if volume is not None else 0
-                if v != last_painted_volume or screen != last_painted_screen:
+                # Force repaint during fade so blend advances tick-by-tick.
+                if fade_active or v != last_painted_volume or screen != last_painted_screen:
                     _timed_paint("volume", _paint_volume, v)
                     last_painted_volume = v
 
@@ -336,33 +455,92 @@ def _render_loop_inner():
                     last_idle_paint = now
 
             elif screen == "transition_to_pause":
-                if now - last_transition_paint >= GIF_FRAME_PERIOD:
-                    frames = _load_frames(GIF_PATH_PLAY_TO_PAUSE, resize_to_screen=True)
-                    if not frames or transition_idx >= len(frames):
+                frames = _load_frames(GIF_PATH_PLAY_TO_PAUSE, resize_to_screen=True)
+                if frames:
+                    elapsed = time.perf_counter() - _transition_start_perf
+                    gif_duration = len(frames) * GIF_FRAME_PERIOD
+                    total_duration = gif_duration + TRANSITION_HOLD_AT_END_S
+                    progress = elapsed / total_duration
+                    if progress >= 1.0:
                         with state_lock:
                             if current_screen == "transition_to_pause":
                                 _set_screen_unsafe("idle")
                     else:
-                        _timed_paint("trans-to-pause", _paint_transition_frame, frames[transition_idx])
-                        transition_idx += 1
-                        last_transition_paint = now
+                        # GIF frames advance at GIF rate; cap at last frame
+                        # during the hold-at-end period.
+                        sym_idx = min(int(elapsed / GIF_FRAME_PERIOD), len(frames) - 1)
+                        # Trapezoidal envelope on symbol intensity: ramp up over
+                        # first FADE_PORTION, hold at full through middle, ramp
+                        # down over last FADE_PORTION. Combined with the
+                        # extended total_duration, the LAST frame stays bright
+                        # for a moment before fading out.
+                        if progress < TRANSITION_FADE_PORTION:
+                            symbol_env = progress / TRANSITION_FADE_PORTION
+                        elif progress > 1.0 - TRANSITION_FADE_PORTION:
+                            symbol_env = (1.0 - progress) / TRANSITION_FADE_PORTION
+                        else:
+                            symbol_env = 1.0
+                        if SCREENSAVER_MODE == "procedural":
+                            ahead = screensaver.paint_to_image(
+                                device,
+                                target_population=SCREENSAVER_TARGET_POPULATION,
+                                spawn_rate=SCREENSAVER_SPAWN_RATE,
+                                drift_x=SCREENSAVER_DRIFT_X,
+                                drift_y=SCREENSAVER_DRIFT_Y,
+                                median_speed=SCREENSAVER_MEDIAN_SPEED,
+                            )
+                        else:
+                            ahead = None
+                        _timed_paint("trans-to-pause", _paint_transition_overlay,
+                                     frames[sym_idx], _transition_behind_img, ahead,
+                                     progress, symbol_env)
+                        transition_idx = sym_idx
 
             elif screen == "transition_to_play":
-                if now - last_transition_paint >= GIF_FRAME_PERIOD:
-                    frames = _load_frames(GIF_PATH_PAUSE_TO_PLAY, resize_to_screen=True)
-                    if not frames or transition_idx >= len(frames):
+                frames = _load_frames(GIF_PATH_PAUSE_TO_PLAY, resize_to_screen=True)
+                if frames:
+                    elapsed = time.perf_counter() - _transition_start_perf
+                    gif_duration = len(frames) * GIF_FRAME_PERIOD
+                    total_duration = gif_duration + TRANSITION_HOLD_AT_END_S
+                    progress = elapsed / total_duration
+                    if progress >= 1.0:
                         with state_lock:
                             if current_screen == "transition_to_play":
                                 _set_screen_unsafe("playback")
                     else:
-                        _timed_paint("trans-to-play", _paint_transition_frame, frames[transition_idx])
-                        transition_idx += 1
-                        last_transition_paint = now
+                        sym_idx = min(int(elapsed / GIF_FRAME_PERIOD), len(frames) - 1)
+                        if progress < TRANSITION_FADE_PORTION:
+                            symbol_env = progress / TRANSITION_FADE_PORTION
+                        elif progress > 1.0 - TRANSITION_FADE_PORTION:
+                            symbol_env = (1.0 - progress) / TRANSITION_FADE_PORTION
+                        else:
+                            symbol_env = 1.0
+                        # behind = LIVE screensaver so it keeps animating as it
+                        # fades out (instead of freezing on the snapshot taken
+                        # at transition start).
+                        if SCREENSAVER_MODE == "procedural":
+                            behind = screensaver.paint_to_image(
+                                device,
+                                target_population=SCREENSAVER_TARGET_POPULATION,
+                                spawn_rate=SCREENSAVER_SPAWN_RATE,
+                                drift_x=SCREENSAVER_DRIFT_X,
+                                drift_y=SCREENSAVER_DRIFT_Y,
+                                median_speed=SCREENSAVER_MEDIAN_SPEED,
+                            )
+                        else:
+                            behind = _transition_behind_img
+                        if _transition_ahead_img is None:
+                            _transition_ahead_img = _render_playback_image()
+                        _timed_paint("trans-to-play", _paint_transition_overlay,
+                                     frames[sym_idx], behind,
+                                     _transition_ahead_img, progress, symbol_env)
+                        transition_idx = sym_idx
 
             elif screen == "playback":
                 if status != "play" or title is None:
                     continue
-                if now - last_playback_paint < PLAYBACK_REFRESH_SECONDS:
+                # Bypass the 1Hz throttle while fading in so the blend advances.
+                if not fade_active and now - last_playback_paint < PLAYBACK_REFRESH_SECONDS:
                     continue
                 # Cold-start guard: if no play event seen yet, don't extrapolate from epoch
                 if event_wall > 0:
@@ -390,9 +568,17 @@ def _set_screen_unsafe(name):
     """Caller must hold state_lock."""
     global current_screen, last_screen_change_perf
     if current_screen != name:
+        old = current_screen
         log.info("screen: %s -> %s", current_screen, name)
         current_screen = name
         last_screen_change_perf = time.perf_counter()
+        # Skip the standard crossfade if EITHER side is a transition screen —
+        # transitions render their own primary-screen crossfade with the symbol
+        # GIF superimposed, so the post-transition handoff is already smooth.
+        skip = (name in ("transition_to_pause", "transition_to_play")
+                or old in ("transition_to_pause", "transition_to_play"))
+        if not skip:
+            _start_fade()
         render_wake.set()
 
 

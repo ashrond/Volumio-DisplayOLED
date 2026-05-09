@@ -102,6 +102,10 @@ except (ValueError, TypeError):
     VOLUME_MAX = 100
 VOLUME_BUTTON_RECENT_WINDOW = float(_volume_cfg.get("button_recent_window", 3.0))
 
+# --- Transitions ---
+_trans_cfg = config.get("transitions", {})
+FADE_SECONDS = float(_trans_cfg.get("fade_seconds", 0.15))
+
 # --- Screensaver ---
 _ss_cfg = config.get("screensaver", {})
 SCREENSAVER_MODE = str(_ss_cfg.get("mode", "procedural")).lower()

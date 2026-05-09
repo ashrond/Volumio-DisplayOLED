@@ -89,6 +89,20 @@ def _sample_peak(rx, ry):
 def paint(device, target_population=70, spawn_rate=23.0,
           drift_x=-0.4, drift_y=0.0, median_speed=4.6):
     """Advance the particle sim one step and render to the device."""
+    img = _render(device, target_population, spawn_rate, drift_x, drift_y, median_speed)
+    device.display(img)
+
+
+def paint_to_image(device, target_population=70, spawn_rate=23.0,
+                    drift_x=-0.4, drift_y=0.0, median_speed=4.6):
+    """Same as paint() but returns the image instead of displaying.
+    Used during transitions where we need to composite the screensaver under
+    a symbol GIF overlay. Still mutates particle state (1 tick advance per call)."""
+    return _render(device, target_population, spawn_rate, drift_x, drift_y, median_speed)
+
+
+def _render(device, target_population, spawn_rate, drift_x, drift_y, median_speed):
+    """Internal: advance sim and return the rendered image."""
     global _particles
     w, h = device.width, device.height
 
@@ -125,12 +139,19 @@ def paint(device, target_population=70, spawn_rate=23.0,
     _particles.sort(key=lambda p: p.peak)
 
     for p in _particles:
-        # Brightness envelope: short-lived flash like a firefly,
-        # long-lived drifter just fades in over 2 frames then stays bright.
+        # Brightness envelope. Use (age + 0.5) so newly-spawned particles
+        # (age=0) are already visible on their first paint — without this,
+        # the first frame of the screensaver is BLACK (everyone at age=0
+        # produces env=0), which breaks the screen-change crossfade by
+        # giving it a black target image to fade to.
         if p.is_flash:
-            env = 1.0 - abs(2.0 * (p.age / max(p.lifetime, 1)) - 1.0)
+            if p.lifetime <= 1:
+                env = 1.0
+            else:
+                frac = (p.age + 0.5) / p.lifetime
+                env = 1.0 - abs(2.0 * frac - 1.0)
         else:
-            env = min(1.0, p.age / 2.0)
+            env = min(1.0, (p.age + 0.5) / 2.0)
         if env <= 0:
             continue
         # Tiny per-frame brightness jitter (±8%) so drifters subtly twinkle
@@ -146,9 +167,8 @@ def paint(device, target_population=70, spawn_rate=23.0,
         img_l.paste(scaled, (x, y), mask=scaled)
 
     if device.mode == "L":
-        device.display(img_l)
-    else:
-        device.display(img_l.convert(device.mode))
+        return img_l
+    return img_l.convert(device.mode)
 
 
 def reset():

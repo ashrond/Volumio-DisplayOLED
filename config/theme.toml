@@ -42,6 +42,13 @@ max = 20
 # no seek jump) filter out unrelated periodic events even with a wide window.
 button_recent_window = 30.0
 
+[transitions]
+# Crossfade duration when changing between display states (e.g. playback to
+# volume, idle to playback). Set to 0 to disable.
+# Curve is quadratic ease-in: previous screen lingers for the first ~half,
+# then fades out in the latter half. 0.8s feels visible without dragging.
+fade_seconds = 0.80
+
 [timing]
 # All in seconds. Tweak to taste.
 playback_refresh_seconds = 1.0     # how often the clock + progress bar re-render
