@@ -115,6 +115,17 @@ MENU_IR_UDP_PORT = int(_menu_cfg.get("ir_udp_port", 9876))
 _trans_cfg = config.get("transitions", {})
 FADE_SECONDS = float(_trans_cfg.get("fade_seconds", 0.15))
 
+# --- Burn-in mitigation ---
+_burnin = config.get("burnin", {})
+QUIET_HOURS_START = int(_burnin.get("quiet_hours_start", 0))
+QUIET_HOURS_END = int(_burnin.get("quiet_hours_end", 0))
+PIXEL_SHIFT_ENABLED = bool(_burnin.get("pixel_shift_enabled", True))
+PIXEL_SHIFT_INTERVAL_S = float(_burnin.get("pixel_shift_interval_s", 180.0))
+TRACK_FADE_ENABLED = bool(_burnin.get("track_fade_enabled", True))
+TRACK_FADE_MAX = max(0, min(255, int(_burnin.get("track_fade_max", 255))))
+TRACK_FADE_MIN = max(0, min(255, int(_burnin.get("track_fade_min", 0))))
+TRACK_FADE_IN_S = float(_burnin.get("track_fade_in_s", 0.8))
+
 # --- Screensaver ---
 _ss_cfg = config.get("screensaver", {})
 SCREENSAVER_MODE = str(_ss_cfg.get("mode", "procedural")).lower()

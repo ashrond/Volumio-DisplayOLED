@@ -39,6 +39,9 @@ from config.config import (
     SCREENSAVER_MEDIAN_SPEED, SCREENSAVER_DRIFT_X, SCREENSAVER_DRIFT_Y,
     FADE_SECONDS,
     MENU_TIMEOUT_SECONDS, MENU_IR_UDP_PORT,
+    QUIET_HOURS_START, QUIET_HOURS_END,
+    PIXEL_SHIFT_ENABLED, PIXEL_SHIFT_INTERVAL_S,
+    TRACK_FADE_ENABLED, TRACK_FADE_MAX, TRACK_FADE_MIN, TRACK_FADE_IN_S,
 )
 from screens.startup import display_startup
 from screens.playback import display_playback_screen, needs_marquee
@@ -86,11 +89,52 @@ except ImportError:
 _NIBBLE_FROM_BYTE = bytes(b >> 4 for b in range(256))            # 0..255 -> 0..15
 _NIBBLE_TO_HIGH   = bytes((b << 4) & 0xFF for b in range(256))   # 0..15  -> 0..240
 
+# --- Pixel shift (burn-in mitigation) ---
+# Cycles the rendered frame by 1px through a 4-position pattern. Applied at
+# the lowest level — just before SPI — so the rest of the render path is
+# blissfully unaware. Adds a single paste per frame (~0.5ms).
+_PIXEL_SHIFT_POSITIONS = ((0, 0), (1, 0), (1, 1), (0, 1))
+_pixel_shift_idx = 0
+_pixel_shift_last_change_perf = 0.0
+_shift_canvas = None
+
+
+def _maybe_advance_pixel_shift():
+    global _pixel_shift_idx, _pixel_shift_last_change_perf
+    if not PIXEL_SHIFT_ENABLED:
+        return
+    now = time.perf_counter()
+    if now - _pixel_shift_last_change_perf >= PIXEL_SHIFT_INTERVAL_S:
+        _pixel_shift_idx = (_pixel_shift_idx + 1) % len(_PIXEL_SHIFT_POSITIONS)
+        _pixel_shift_last_change_perf = now
+
+
+def _apply_pixel_shift(image):
+    """Return image shifted by the current pixel-shift offset, or the original
+    image if no shift is active. Reuses a single canvas to avoid per-frame
+    allocation."""
+    global _shift_canvas
+    if not PIXEL_SHIFT_ENABLED:
+        return image
+    ox, oy = _PIXEL_SHIFT_POSITIONS[_pixel_shift_idx]
+    if ox == 0 and oy == 0:
+        return image
+    if (_shift_canvas is None
+            or _shift_canvas.size != image.size
+            or _shift_canvas.mode != image.mode):
+        _shift_canvas = Image.new(image.mode, image.size, "black")
+    ImageDraw.Draw(_shift_canvas).rectangle(
+        (0, 0, image.size[0], image.size[1]), fill="black")
+    _shift_canvas.paste(image, (ox, oy))
+    return _shift_canvas
+
 
 def _fast_greyscale_display_numpy(self, image):
     assert image.mode == self.mode
     assert image.size == self.size
     image = self.preprocess(image)
+    _maybe_advance_pixel_shift()
+    image = _apply_pixel_shift(image)
     nibble_order = self._nibble_order
     for _, bbox in self.framebuffer.redraw(image):
         left, top, right, bottom = self._inflate_bbox(bbox)
@@ -109,6 +153,8 @@ def _fast_greyscale_display_bytes(self, image):
     assert image.mode == self.mode
     assert image.size == self.size
     image = self.preprocess(image)
+    _maybe_advance_pixel_shift()
+    image = _apply_pixel_shift(image)
     nibble_order = self._nibble_order
     for _, bbox in self.framebuffer.redraw(image):
         left, top, right, bottom = self._inflate_bbox(bbox)
@@ -437,6 +483,65 @@ PAUSE_TO_PLAY_DEBOUNCE = PAUSE_TO_PLAY_DEBOUNCE_SECONDS
 render_wake = threading.Event()
 shutdown_event = threading.Event()  # set on SIGTERM/SIGINT
 
+# --- Burn-in mitigation: quiet hours + per-track brightness fade ---
+_was_in_quiet_hours = False        # so we can detect the boundary on exit
+_last_contrast_set = -1            # debounce SPI writes for contrast
+_last_contrast_update_perf = 0.0
+_CONTRAST_UPDATE_INTERVAL_S = 1.0  # update brightness at most once per second
+
+
+def _in_quiet_hours():
+    """True if current local time falls in [QUIET_HOURS_START, QUIET_HOURS_END).
+    Handles ranges that wrap midnight (start > end)."""
+    if QUIET_HOURS_START == QUIET_HOURS_END:
+        return False
+    h = time.localtime().tm_hour
+    if QUIET_HOURS_START < QUIET_HOURS_END:
+        return QUIET_HOURS_START <= h < QUIET_HOURS_END
+    return h >= QUIET_HOURS_START or h < QUIET_HOURS_END
+
+
+def _update_track_brightness():
+    """Drive the SSD1322 contrast register based on Volumio's current playback
+    position within the track: brief fade-in over TRACK_FADE_IN_S, then linear
+    taper from MAX → MIN by end of track. Throttled to 1 Hz to avoid spamming
+    SPI writes for sub-LSB changes."""
+    global _last_contrast_set, _last_contrast_update_perf
+    if not TRACK_FADE_ENABLED:
+        return
+    now = time.perf_counter()
+    if now - _last_contrast_update_perf < _CONTRAST_UPDATE_INTERVAL_S:
+        return
+    _last_contrast_update_perf = now
+
+    # Only manage brightness while in play/pause. Loading/stop/idle/menu/etc.
+    # leave the contrast at whatever the last play state set it to.
+    if last_status not in ("play", "pause"):
+        return
+    # Webradio (no duration) doesn't fade — stay at max so streaming is legible.
+    if last_duration <= 0:
+        target = TRACK_FADE_MAX
+    else:
+        # Use Volumio's reported seek directly. It naturally pauses with playback
+        # and is accurate to ~1 second, which is invisible at this fade rate.
+        seek_s = last_seek / 1000.0
+        if seek_s < TRACK_FADE_IN_S:
+            target = int(TRACK_FADE_MAX * (seek_s / TRACK_FADE_IN_S))
+        else:
+            duration_s = float(last_duration)
+            denom = max(0.001, duration_s - TRACK_FADE_IN_S)
+            progress = min(1.0, max(0.0, (seek_s - TRACK_FADE_IN_S) / denom))
+            target = int(TRACK_FADE_MAX - (TRACK_FADE_MAX - TRACK_FADE_MIN) * progress)
+    target = max(0, min(255, target))
+    if target == _last_contrast_set:
+        return
+    try:
+        device.contrast(target)
+        _last_contrast_set = target
+    except Exception as e:
+        log.warning("device.contrast(%d) failed: %s", target, e)
+
+
 # In-memory trace ring buffer for diagnosing Heisenbugs that don't reproduce
 # under DEBUG file logging (the I/O latency masks timing-sensitive races).
 # `_trace()` is microsecond-cheap; SIGUSR1 dumps the buffer to /tmp/vfd-trace.log.
@@ -642,7 +747,7 @@ def render_loop():
 def _render_loop_inner():
     global last_render_tick_wall, _idle_entered_perf, _screen_off_entered_perf
     global _screen_off_panel_hidden, _transition_behind_img, _transition_ahead_img
-    global _transition_start_perf
+    global _transition_start_perf, _was_in_quiet_hours
     log.info("render loop started (tick=%.2fs, gif=%dfps)", RENDER_TICK_SECONDS, int(1.0 / GIF_FRAME_PERIOD))
     idle_idx = 0
     loading_idx = 0
@@ -717,6 +822,31 @@ def _render_loop_inner():
                              MENU_TIMEOUT_SECONDS, _menu_pre_screen)
                     _set_screen_unsafe(_menu_pre_screen or "playback")
             continue
+
+        # Burn-in mitigation: drive contrast based on track progress (no-op
+        # outside play/pause; throttled internally to 1 Hz).
+        _update_track_brightness()
+
+        # Burn-in mitigation: quiet hours force the panel into screen_off.
+        # On exit we wake to whatever screen makes sense for current state.
+        in_quiet = _in_quiet_hours()
+        if in_quiet and current_screen != "screen_off":
+            with state_lock:
+                if current_screen != "screen_off":
+                    log.info("entering quiet hours (%02d:00–%02d:00), -> screen_off",
+                             QUIET_HOURS_START, QUIET_HOURS_END)
+                    _set_screen_unsafe("screen_off")
+            _was_in_quiet_hours = True
+            continue
+        if _was_in_quiet_hours and not in_quiet:
+            wake_target = "playback" if last_status == "play" else "idle"
+            with state_lock:
+                if current_screen == "screen_off":
+                    log.info("quiet hours ended, -> %s", wake_target)
+                    _set_screen_unsafe(wake_target)
+            _was_in_quiet_hours = False
+        else:
+            _was_in_quiet_hours = in_quiet
 
         # Auto-transition: idle has been showing for too long → fade to black + sleep panel.
         # The `last_painted_screen == "idle"` gate prevents this from firing on the FIRST

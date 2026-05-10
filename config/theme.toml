@@ -55,6 +55,34 @@ ir_udp_port = 9876
 # then fades out in the latter half. 0.8s feels visible without dragging.
 fade_seconds = 0.80
 
+[burnin]
+# Burn-in mitigation for the SSD1322 OLED. Single-color OLEDs can show
+# ghosting in 1-3 months of 24/7 static content; these knobs spread the wear.
+
+# --- Quiet hours ---
+# Force the panel into screen_off (true hardware sleep) during these hours
+# (24-hr local time). Set both to the same value to disable.
+# Wraps midnight, e.g. start=22, end=6 means 10pm through 6am.
+quiet_hours_start = 2          # 2:00 AM
+quiet_hours_end   = 6          # 6:00 AM
+
+# --- Pixel shift ---
+# Cycles the rendered UI by 1px through a 4-position pattern every N seconds.
+# Imperceptible visually, ~zero CPU. Spreads pixel wear across a 2x2 region.
+pixel_shift_enabled      = true
+pixel_shift_interval_s   = 180  # advance one position every 3 minutes
+
+# --- Per-track brightness fade ---
+# Drives the SSD1322 contrast register (0-255) based on Volumio's playback
+# position within each track: brief fade-in at the start, then a linear taper
+# down to the min value by the end of the track. Reduces total OLED-on
+# luminance without losing visual information for most of the track.
+# Webradio (no duration) ignores this and stays at max.
+track_fade_enabled = true
+track_fade_max     = 255       # contrast at start of track (0-255)
+track_fade_min     = 0         # contrast at end of track (0 = panel goes dark)
+track_fade_in_s    = 0.8       # quick ramp-up at track start
+
 [timing]
 # All in seconds. Tweak to taste.
 playback_refresh_seconds = 1.0           # how often the clock + progress bar re-render
