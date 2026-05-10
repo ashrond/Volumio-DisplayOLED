@@ -14,6 +14,7 @@ import signal
 import socket
 import subprocess
 import queue as _queue
+import collections
 import threading
 import urllib.request
 import urllib.parse
@@ -372,6 +373,19 @@ volume_initialized = False
 PAUSE_TO_PLAY_DEBOUNCE = PAUSE_TO_PLAY_DEBOUNCE_SECONDS
 render_wake = threading.Event()
 shutdown_event = threading.Event()  # set on SIGTERM/SIGINT
+
+# In-memory trace ring buffer for diagnosing Heisenbugs that don't reproduce
+# under DEBUG file logging (the I/O latency masks timing-sensitive races).
+# `_trace()` is microsecond-cheap; SIGUSR1 dumps the buffer to /tmp/vfd-trace.log.
+_TRACE_MAX = 4000
+_trace_buffer = collections.deque(maxlen=_TRACE_MAX)
+_trace_lock = threading.Lock()
+
+
+def _trace(msg):
+    ts = time.perf_counter()
+    with _trace_lock:
+        _trace_buffer.append((ts, msg))
 SLOW_PAINT_MS = 30
 SLOW_HANDLER_MS = 20
 last_screen_change_perf = 0.0
@@ -865,6 +879,7 @@ def _set_screen_unsafe(name):
     if current_screen != name:
         old = current_screen
         log.info("screen: %s -> %s", current_screen, name)
+        _trace("screen %s -> %s" % (old, name))
         current_screen = name
         last_screen_change_perf = time.perf_counter()
         # Wake the OLED panel if we're leaving screen_off, before any paint.
@@ -971,8 +986,13 @@ def _handle_pushstate(data):
             "pushState: status=%s title=%r vol=%s seek=%.1fs/%ss screen=%s",
             state, title, volume, seek / 1000.0, duration, current_screen,
         )
+        _trace("pushState in: state=%s prev_state=%s vol=%s(raw=%r) prev_vol=%s "
+               "title=%r prev_title=%r seek=%s prev_seek=%s screen=%s service=%s"
+               % (state, last_status, volume, raw_volume, last_volume,
+                  title, last_title, seek, last_seek, current_screen, last_service))
 
         if current_screen == "startup":
+            _trace("pushState skip: startup screen")
             return
 
         now = time.time()
@@ -990,16 +1010,21 @@ def _handle_pushstate(data):
                 last_volume = volume
                 volume_initialized = True
                 log.info("volume initialized: %s", volume)
+                _trace("vol init -> %s (no flash)" % volume)
             elif volume != prev_volume:
                 last_volume = volume
                 last_volume_event_wall = now
                 volume_event = True
+                _trace("VOL_EVENT real-diff: %s -> %s (title_changed=%s seek_dec=%s state=%s prev_state=%s)"
+                       % (prev_volume, volume, title_changed, seek_decreased, state, prev_status))
             elif (state == "play" and prev_status == "play"
                   and not title_changed and not seek_decreased
                   and last_volume_event_wall
                   and (now - last_volume_event_wall) < VOLUME_BUTTON_RECENT_WINDOW):
                 last_volume_event_wall = now
                 volume_event = True
+                _trace("VOL_EVENT heuristic: vol=%s prev=%s within=%.2fs"
+                       % (volume, prev_volume, now - last_volume_event_wall))
 
         # IR-bounce debounce: ignore play events within PAUSE_TO_PLAY_DEBOUNCE of a pause
         ignore_state_change = False
@@ -1131,6 +1156,33 @@ def _shutdown(signum, _frame):
         log.warning("sio.disconnect during shutdown: %s", e)
 
 
+def _toggle_log_level(_signum, _frame):
+    """SIGUSR2: flip log level between DEBUG and INFO live (no restart).
+    Lets us crank verbosity up to capture an in-the-act bug, then drop it
+    back without losing the running process state."""
+    import logging
+    new_level = logging.INFO if log.level == logging.DEBUG else logging.DEBUG
+    log.setLevel(new_level)
+    log.warning("log level toggled to %s via SIGUSR2", logging.getLevelName(new_level))
+
+
+def _dump_trace(_signum=None, _frame=None):
+    """SIGUSR1: snapshot the in-memory trace ring buffer to /tmp/vfd-trace.log.
+    Appends to the file so multiple dumps over a session accumulate."""
+    path = "/tmp/vfd-trace.log"
+    with _trace_lock:
+        snapshot = list(_trace_buffer)
+    try:
+        with open(path, "a") as f:
+            f.write("---- trace dump %s (%d events) ----\n" %
+                    (time.strftime("%H:%M:%S"), len(snapshot)))
+            for ts, msg in snapshot:
+                f.write("%.6f %s\n" % (ts, msg))
+        log.warning("trace buffer (%d events) dumped to %s", len(snapshot), path)
+    except Exception as e:
+        log.error("trace dump failed: %s", e)
+
+
 def _open_menu():
     """Open the top-level menu and switch screen state."""
     global _menu_pre_screen, _menu_entered_perf, _menu_last_input_perf
@@ -1250,6 +1302,8 @@ def _ir_udp_listener_thread():
 if __name__ == "__main__":
     signal.signal(signal.SIGTERM, _shutdown)
     signal.signal(signal.SIGINT, _shutdown)
+    signal.signal(signal.SIGUSR2, _toggle_log_level)
+    signal.signal(signal.SIGUSR1, _dump_trace)
 
     log.info("=== vfd starting ===")
     log.info("device: ssd1322 mode=%s size=%dx%d", device.mode, device.width, device.height)
