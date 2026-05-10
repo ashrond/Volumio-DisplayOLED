@@ -60,11 +60,74 @@ GIF_FRAME_PERIOD = 0.1
 SCREENSAVER_FRAME_PERIOD = 0.04
 
 # --- SPI device ---
-# SSD1322 supports 4-bit (16-level) grayscale. Default luma mode is "RGB"
-# which is then mapped down to grayscale at display time. Keep this — DO NOT
-# convert frames to mode "1" (1-bit) on load; that throws away all gradient.
+# SSD1322 supports 4-bit (16-level) grayscale. luma.core only accepts modes
+# "1", "RGB", "RGBA" — there's no "L" option (verified 2026-05-10). So we keep
+# RGB and override display() with a vectorized RGB→4bpp conversion below;
+# the stock implementation has a pure-Python per-pixel loop that dominates CPU.
 serial = spi(device=0, port=0, bus_speed_hz=8000000)
 device = ssd1322(serial)
+
+
+# --- Fast device.display() override ---
+# The stock luma greyscale renderer iterates every pixel in Python doing
+# `grey = (r*306 + g*601 + b*117) >> 14` plus nibble packing. On a Pi 0w2
+# that's ~80ms for a full-screen frame — the dominant cost in our render path.
+# We replace it with vectorized C-level ops. Two implementations:
+#   - numpy path (preferred): clearest and fastest
+#   - bytes/int fallback: works without numpy, still much faster than stock
+# Both keep the framebuffer.redraw() dirty-region logic intact.
+import types as _types
+try:
+    import numpy as _np
+    _HAVE_NUMPY = True
+except ImportError:
+    _HAVE_NUMPY = False
+
+_NIBBLE_FROM_BYTE = bytes(b >> 4 for b in range(256))            # 0..255 -> 0..15
+_NIBBLE_TO_HIGH   = bytes((b << 4) & 0xFF for b in range(256))   # 0..15  -> 0..240
+
+
+def _fast_greyscale_display_numpy(self, image):
+    assert image.mode == self.mode
+    assert image.size == self.size
+    image = self.preprocess(image)
+    nibble_order = self._nibble_order
+    for _, bbox in self.framebuffer.redraw(image):
+        left, top, right, bottom = self._inflate_bbox(bbox)
+        seg = image.crop((left, top, right, bottom))
+        # RGB -> L (PIL C) -> uint8 numpy array, divided down to 4-bit values.
+        flat = (_np.asarray(seg.convert("L"), dtype=_np.uint8).ravel() >> 4)
+        if nibble_order == 0:
+            packed = (flat[0::2] << 4) | flat[1::2]
+        else:
+            packed = (flat[1::2] << 4) | flat[0::2]
+        self._set_position(top, right, bottom, left)
+        self.data(packed.tolist())
+
+
+def _fast_greyscale_display_bytes(self, image):
+    assert image.mode == self.mode
+    assert image.size == self.size
+    image = self.preprocess(image)
+    nibble_order = self._nibble_order
+    for _, bbox in self.framebuffer.redraw(image):
+        left, top, right, bottom = self._inflate_bbox(bbox)
+        seg = image.crop((left, top, right, bottom))
+        nibbles = seg.convert("L").tobytes().translate(_NIBBLE_FROM_BYTE)
+        if nibble_order == 0:
+            highs = nibbles[0::2].translate(_NIBBLE_TO_HIGH)
+            lows  = nibbles[1::2]
+        else:
+            highs = nibbles[1::2].translate(_NIBBLE_TO_HIGH)
+            lows  = nibbles[0::2]
+        n = len(lows)
+        packed = (int.from_bytes(highs, "big") | int.from_bytes(lows, "big")).to_bytes(n, "big")
+        self._set_position(top, right, bottom, left)
+        self.data(list(packed))
+
+
+_fast_display_impl = _fast_greyscale_display_numpy if _HAVE_NUMPY else _fast_greyscale_display_bytes
+device.display = _types.MethodType(_fast_display_impl, device)
 
 # --- Screen-change crossfade ---
 # Wrap device.display() so that whenever a screen change is signaled (via
@@ -845,7 +908,7 @@ def _render_loop_inner():
                 if is_stream:
                     paint_period = 0.08          # ~12fps for chasers
                 elif needs_marquee(title):
-                    paint_period = 0.06          # ~16fps for scrolling text
+                    paint_period = 0.083         # ~12fps for scrolling text — slightly chunkier than 17fps but ~30% less work
                 else:
                     paint_period = PLAYBACK_REFRESH_SECONDS
                 if not fade_active and now - last_playback_paint < paint_period:

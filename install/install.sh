@@ -12,10 +12,17 @@ fi
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 SERVICE_SRC="$PROJECT_DIR/install/volumio-display.service"
 SERVICE_DST="/etc/systemd/system/volumio-display.service"
+REQUIREMENTS="$PROJECT_DIR/install/requirements.txt"
 
 if [[ ! -f "$SERVICE_SRC" ]]; then
     echo "Missing $SERVICE_SRC"
     exit 1
+fi
+
+# Install Python deps for the volumio user (the service runs as volumio).
+if [[ -f "$REQUIREMENTS" ]]; then
+    echo ":: installing python deps from $REQUIREMENTS (as volumio)"
+    sudo -u volumio pip3 install --user --upgrade -r "$REQUIREMENTS"
 fi
 
 # Stop the running version (if any) before swapping.

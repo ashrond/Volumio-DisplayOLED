@@ -1,0 +1,20 @@
+# Python runtime dependencies for Volumio-Display.
+# Pinned to the versions verified working on the Pi Zero 2W deployment
+# (Raspbian 10 buster, Python 3.7). Loosen the pins on a fresh install
+# only after testing — luma.oled in particular has had breaking API
+# changes between minor versions.
+python-socketio>=4.6.0,<5
+luma.oled>=3.13.0,<4
+Pillow>=9.0,<11
+toml>=0.10
+# numpy is OPTIONAL. The display() override in main.py auto-selects between
+# a numpy path and a bytes-only fallback at startup. The bytes fallback is
+# already ~5x faster than the stock luma renderer; numpy gives a small
+# additional gain (~1-2%) but the install is fragile on Volumio Buster:
+#   - Volumio's apt mirror does NOT ship libatlas3-base / libopenblas
+#   - Default pip 18.1 is too old to consume modern wheels — must upgrade pip
+#     first: pip3 install --user --upgrade "pip<22"
+#   - Then pin to a piwheels-available cp37 wheel (1.21.4 confirmed working
+#     wheel-wise but fails to import without BLAS runtime)
+# Recommended: skip numpy unless you've already sorted out the BLAS deps.
+# numpy==1.21.4

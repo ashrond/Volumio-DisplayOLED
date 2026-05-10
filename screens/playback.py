@@ -10,6 +10,45 @@ _marquee_offset_px = 0.0
 _marquee_last_perf = 0.0
 _marquee_title = None  # reset offset when title changes
 
+# Sprite caches — text only re-rasterizes when its content changes.
+# Same pattern for marquee (changes per track), clock (changes per minute),
+# and artist (changes per track).
+_marquee_strip = None
+_marquee_strip_title = None
+_marquee_strip_mode = None
+_marquee_strip_cycle_w = 0
+
+_clock_sprite = None
+_clock_sprite_text = None
+_clock_sprite_mode = None
+_clock_sprite_w = 0
+
+_artist_sprite = None
+_artist_sprite_text = None
+_artist_sprite_mode = None
+_artist_sprite_w = 0
+
+
+def _get_or_build_sprite(state, text, font, mode):
+    """Return (sprite, width) for `text` at `font` in `mode`. `state` is a
+    3-tuple (current_sprite, current_text, current_mode); rebuild when text or
+    mode differ. Tiny helper to keep the sprite-cache pattern terse."""
+    cur_sprite, cur_text, cur_mode = state
+    if cur_sprite is not None and cur_text == text and cur_mode == mode:
+        return cur_sprite, cur_sprite.size[0]
+    w = font.getbbox(text)[2]
+    h = font.size + 4
+    s = Image.new(mode, (w, h), "black")
+    ImageDraw.Draw(s).text((0, 0), text, font=font, fill=text_color)
+    return s, w
+
+# Double-buffered persistent canvas — eliminates per-frame Image.new() and
+# the GC pressure that comes with it. We alternate between two canvases so
+# _last_displayed (held by main.py's crossfade for snapshotting) always points
+# to a stable buffer that isn't being mutated.
+_canvases = None
+_canvas_idx = 0
+
 # Marquee tuning (could be moved to theme.toml later if desired)
 SCROLL_SPEED_PX_PER_S = 28      # how fast the title scrolls
 MARQUEE_GAP_PX = 40             # blank space between repetitions of the title
@@ -30,6 +69,18 @@ def needs_marquee(title):
     return font_title.getbbox(title)[2] > 256  # device width is fixed
 
 
+def _build_marquee_strip(title, mode):
+    """Rasterize the title text into an Image strip one marquee-cycle wide
+    (title + trailing gap). Called once per title change; the result is then
+    pasted at moving offsets each frame — no per-frame text rendering."""
+    title_w = font_title.getbbox(title)[2]
+    cycle_w = title_w + MARQUEE_GAP_PX
+    strip_h = font_title.size + 4  # comfortably fits the glyph bbox
+    strip = Image.new(mode, (cycle_w, strip_h), "black")
+    ImageDraw.Draw(strip).text((0, 0), title, font=font_title, fill=text_color)
+    return strip, cycle_w
+
+
 def _advance_marquee(title):
     """Update the scroll offset based on wall-clock time. Returns current offset."""
     global _marquee_offset_px, _marquee_last_perf, _marquee_title
@@ -45,24 +96,45 @@ def _advance_marquee(title):
 
 def draw_static_info(draw, device, title, formatted_artist, progress_percent):
     """Draws time, title (centered or scrolling), progress bar, and artist."""
+    global _clock_sprite, _clock_sprite_text, _clock_sprite_mode, _clock_sprite_w
+    global _artist_sprite, _artist_sprite_text, _artist_sprite_mode, _artist_sprite_w
     screen_width = device.width
     current_time = time.strftime("%I:%M %p")
-    time_width = font_time.getbbox(current_time)[2]
-    artist_width = font_artist.getbbox(formatted_artist)[2]
     title_width = font_title.getbbox(title)[2]
+    target_mode = _target_image.mode if _target_image is not None else "L"
 
-    # Time (clock) at top, centered
-    draw.text(((screen_width - time_width) // 2, TIME_Y),
-              current_time, font=font_time, fill=text_color)
+    # Time (clock) at top, centered. Cached — rasterized once per minute.
+    _clock_sprite, _clock_sprite_w = _get_or_build_sprite(
+        (_clock_sprite, _clock_sprite_text, _clock_sprite_mode),
+        current_time, font_time, target_mode,
+    )
+    _clock_sprite_text = current_time
+    _clock_sprite_mode = target_mode
+    if _target_image is not None:
+        _target_image.paste(_clock_sprite, ((screen_width - _clock_sprite_w) // 2, TIME_Y))
+    else:
+        draw.text(((screen_width - _clock_sprite_w) // 2, TIME_Y),
+                  current_time, font=font_time, fill=text_color)
 
-    # Title — centered if it fits, otherwise scrolling marquee with seamless wrap
+    # Title — centered if it fits, otherwise scrolling marquee with seamless wrap.
+    # Marquee path uses a cached pre-rendered sprite (see _build_marquee_strip).
     if title_width > screen_width:
+        global _marquee_strip, _marquee_strip_title, _marquee_strip_mode, _marquee_strip_cycle_w
+        target_mode = _target_image.mode if _target_image is not None else "L"
+        if _marquee_strip_title != title or _marquee_strip_mode != target_mode:
+            _marquee_strip, _marquee_strip_cycle_w = _build_marquee_strip(title, target_mode)
+            _marquee_strip_title = title
+            _marquee_strip_mode = target_mode
         offset = _advance_marquee(title)
-        cycle = title_width + MARQUEE_GAP_PX
-        x = -(int(offset) % cycle)
-        # Two copies side by side so the wrap-around is invisible
-        draw.text((x, TITLE_Y), title, font=font_title, fill=text_color)
-        draw.text((x + cycle, TITLE_Y), title, font=font_title, fill=text_color)
+        x = -(int(offset) % _marquee_strip_cycle_w)
+        if _target_image is not None:
+            _target_image.paste(_marquee_strip, (x, TITLE_Y))
+            _target_image.paste(_marquee_strip, (x + _marquee_strip_cycle_w, TITLE_Y))
+        else:
+            # Fallback for any caller that didn't set _target_image (shouldn't
+            # happen in normal operation, but keep correctness).
+            draw.text((x, TITLE_Y), title, font=font_title, fill=text_color)
+            draw.text((x + _marquee_strip_cycle_w, TITLE_Y), title, font=font_title, fill=text_color)
     else:
         draw.text(((screen_width - title_width) // 2, TITLE_Y),
                   title, font=font_title, fill=text_color)
@@ -83,9 +155,18 @@ def draw_static_info(draw, device, title, formatted_artist, progress_percent):
         draw.rectangle((bar_x, PROGRESS_BAR_Y, bar_x + bar_length, PROGRESS_BAR_Y + PROGRESS_BAR_H),
                        outline=text_color, fill=text_color)
 
-    # Artist
-    draw.text(((screen_width - artist_width) // 2, ARTIST_Y),
-              formatted_artist, font=font_artist, fill=text_color)
+    # Artist — cached, rasterized only when the artist string changes.
+    _artist_sprite, _artist_sprite_w = _get_or_build_sprite(
+        (_artist_sprite, _artist_sprite_text, _artist_sprite_mode),
+        formatted_artist, font_artist, target_mode,
+    )
+    _artist_sprite_text = formatted_artist
+    _artist_sprite_mode = target_mode
+    if _target_image is not None:
+        _target_image.paste(_artist_sprite, ((screen_width - _artist_sprite_w) // 2, ARTIST_Y))
+    else:
+        draw.text(((screen_width - _artist_sprite_w) // 2, ARTIST_Y),
+                  formatted_artist, font=font_artist, fill=text_color)
 
 
 # Stream sweep tuning
@@ -169,17 +250,30 @@ def _paste_stream_sweep(target_img, bar_x):
 
 def display_playback_screen(device, title, artist, seek, duration, is_stream=False):
     """Paints ONE frame of the playback screen. Must return quickly — called from render loop hot path."""
-    global _is_stream, _target_image
+    global _is_stream, _target_image, _canvases, _canvas_idx
     _is_stream = is_stream
     seek_seconds = seek / 1000
     progress_percent = min(100, int((seek_seconds / duration) * 100)) if duration > 0 else 0
     formatted_artist = f"-{artist}-" if artist else "-Unknown Artist-"
 
-    # Build image directly (instead of using canvas()) so the streaming sweep
-    # painter can do PIL paste ops on the underlying image.
-    img = Image.new(device.mode, (device.width, device.height), "black")
-    _target_image = img
-    draw = ImageDraw.Draw(img)
+    # Lazy-init the double-buffered canvas pair (size/mode taken from device).
+    if (_canvases is None
+            or _canvases[0].size != (device.width, device.height)
+            or _canvases[0].mode != device.mode):
+        _canvases = [
+            Image.new(device.mode, (device.width, device.height), "black"),
+            Image.new(device.mode, (device.width, device.height), "black"),
+        ]
+
+    canvas = _canvases[_canvas_idx]
+    draw = ImageDraw.Draw(canvas)
+    # Clear last frame's contents (mode-agnostic via ImageDraw).
+    draw.rectangle((0, 0, device.width, device.height), fill="black")
+    _target_image = canvas
     draw_static_info(draw, device, title, formatted_artist, progress_percent)
     _target_image = None
-    device.display(img)
+    device.display(canvas)
+    # Swap so next frame paints into the OTHER buffer; the just-displayed
+    # canvas is now what main.py's _last_displayed references and won't be
+    # mutated again until 2 frames later (after the next display() returns).
+    _canvas_idx = 1 - _canvas_idx
