@@ -718,8 +718,13 @@ def _render_loop_inner():
                     _set_screen_unsafe(_menu_pre_screen or "playback")
             continue
 
-        # Auto-transition: idle has been showing for too long → fade to black + sleep panel
-        if (screen == "idle" and _idle_entered_perf > 0
+        # Auto-transition: idle has been showing for too long → fade to black + sleep panel.
+        # The `last_painted_screen == "idle"` gate prevents this from firing on the FIRST
+        # tick after entering idle, before the entry block below has refreshed
+        # `_idle_entered_perf`. Without it, a stale timestamp from a prior idle session
+        # would immediately trip screen_off the moment we enter idle from a transition.
+        if (screen == "idle" and last_painted_screen == "idle"
+                and _idle_entered_perf > 0
                 and SCREEN_OFF_AFTER_IDLE_SECONDS > 0
                 and time.perf_counter() - _idle_entered_perf > SCREEN_OFF_AFTER_IDLE_SECONDS):
             with state_lock:
