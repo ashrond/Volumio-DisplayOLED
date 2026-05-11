@@ -840,11 +840,17 @@ def _render_loop_inner():
             continue
         if _was_in_quiet_hours and not in_quiet:
             wake_target = "playback" if last_status == "play" else "idle"
+            woke = False
             with state_lock:
                 if current_screen == "screen_off":
                     log.info("quiet hours ended, -> %s", wake_target)
                     _set_screen_unsafe(wake_target)
+                    woke = True
             _was_in_quiet_hours = False
+            if woke:
+                # Skip the rest of this tick — `screen` is still the stale
+                # "screen_off" value and would re-hide the panel we just woke.
+                continue
         else:
             _was_in_quiet_hours = in_quiet
 
@@ -1259,6 +1265,12 @@ def _handle_pushstate(data):
         # Menu owns the screen while open — don't auto-switch on incidental
         # state changes (e.g. track auto-advance during menu interaction).
         if current_screen == "menu":
+            return
+        # During quiet hours, all state updates above still apply (so we wake to
+        # the right thing at 6am), but DO NOT touch the screen — leave it in
+        # screen_off. Without this gate, every incoming pushState would flap
+        # us through transition_to_play -> screen_off in a tight loop.
+        if _in_quiet_hours():
             return
         if volume_event:
             if current_screen != "volume":
