@@ -78,10 +78,13 @@ pixel_shift_interval_s   = 180  # advance one position every 3 minutes
 # down to the min value by the end of the track. Reduces total OLED-on
 # luminance without losing visual information for most of the track.
 # Webradio (no duration) ignores this and stays at max.
-track_fade_enabled = true
-track_fade_max     = 255       # contrast at start of track (0-255)
-track_fade_min     = 0         # contrast at end of track (0 = panel goes dark)
-track_fade_in_s    = 0.8       # quick ramp-up at track start
+track_fade_enabled         = true
+track_fade_max             = 255   # contrast at the fade origin (0-255)
+track_fade_min             = 0     # contrast at end of track (0 = panel goes dark)
+# When pause/menu resets the fade, if the remaining track time is shorter
+# than this, don't bother — leave brightness at max for the rest of the
+# track (a fade that finishes in 20s feels distracting).
+track_fade_min_remaining_s = 60.0
 
 [timing]
 # All in seconds. Tweak to taste.

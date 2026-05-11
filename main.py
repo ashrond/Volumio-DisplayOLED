@@ -41,7 +41,7 @@ from config.config import (
     MENU_TIMEOUT_SECONDS, MENU_IR_UDP_PORT,
     QUIET_HOURS_START, QUIET_HOURS_END,
     PIXEL_SHIFT_ENABLED, PIXEL_SHIFT_INTERVAL_S,
-    TRACK_FADE_ENABLED, TRACK_FADE_MAX, TRACK_FADE_MIN, TRACK_FADE_IN_S,
+    TRACK_FADE_ENABLED, TRACK_FADE_MAX, TRACK_FADE_MIN, TRACK_FADE_MIN_REMAINING_S,
 )
 from screens.startup import display_startup
 from screens.playback import display_playback_screen, needs_marquee
@@ -489,6 +489,12 @@ _last_contrast_set = -1            # debounce SPI writes for contrast
 _last_contrast_update_perf = 0.0
 _CONTRAST_UPDATE_INTERVAL_S = 1.0  # update brightness at most once per second
 
+# The "fade origin" is the seek (in ms) at which brightness is at TRACK_FADE_MAX.
+# Brightness ramps linearly down to TRACK_FADE_MIN at end-of-track. New tracks
+# reset this to 0; pause/menu reset it to current seek so the user gets a bright
+# screen and a fresh fade over the remaining track.
+_fade_origin_seek_ms = 0
+
 
 def _in_quiet_hours():
     """True if current local time falls in [QUIET_HOURS_START, QUIET_HOURS_END).
@@ -501,11 +507,27 @@ def _in_quiet_hours():
     return h >= QUIET_HOURS_START or h < QUIET_HOURS_END
 
 
+def _reset_brightness_fade(origin_seek_ms, reason):
+    """Plant a new fade origin: brightness is at MAX here, MIN at end-of-track.
+    If the remaining track time is shorter than TRACK_FADE_MIN_REMAINING_S,
+    push the origin past end-of-track so brightness stays at MAX for the rest
+    of the track (avoids an annoyingly fast fade in the last few seconds).
+    Forces an immediate brightness update so the user-visible effect is snappy."""
+    global _fade_origin_seek_ms, _last_contrast_update_perf
+    if last_duration > 0:
+        end_ms = last_duration * 1000
+        if end_ms - origin_seek_ms < TRACK_FADE_MIN_REMAINING_S * 1000:
+            origin_seek_ms = end_ms  # clamp past end → formula will hold at MAX
+    _fade_origin_seek_ms = origin_seek_ms
+    _last_contrast_update_perf = 0  # force next _update_track_brightness to run
+    log.info("brightness fade reset (origin=%dms, reason=%s)", origin_seek_ms, reason)
+
+
 def _update_track_brightness():
-    """Drive the SSD1322 contrast register based on Volumio's current playback
-    position within the track: brief fade-in over TRACK_FADE_IN_S, then linear
-    taper from MAX → MIN by end of track. Throttled to 1 Hz to avoid spamming
-    SPI writes for sub-LSB changes."""
+    """Drive the SSD1322 contrast register based on playback position within
+    the current fade segment (origin → end-of-track). Brightness is MAX at the
+    origin and MIN at end-of-track; for seek positions before the origin, also
+    MAX. Throttled to 1 Hz."""
     global _last_contrast_set, _last_contrast_update_perf
     if not TRACK_FADE_ENABLED:
         return
@@ -514,23 +536,21 @@ def _update_track_brightness():
         return
     _last_contrast_update_perf = now
 
-    # Only manage brightness while in play/pause. Loading/stop/idle/menu/etc.
-    # leave the contrast at whatever the last play state set it to.
+    # Only manage brightness while in play/pause; other states keep whatever
+    # contrast we last set (no harm done while panel is hidden, anyway).
     if last_status not in ("play", "pause"):
         return
-    # Webradio (no duration) doesn't fade — stay at max so streaming is legible.
+    # Webradio / unknown-duration: keep at max.
     if last_duration <= 0:
         target = TRACK_FADE_MAX
     else:
-        # Use Volumio's reported seek directly. It naturally pauses with playback
-        # and is accurate to ~1 second, which is invisible at this fade rate.
-        seek_s = last_seek / 1000.0
-        if seek_s < TRACK_FADE_IN_S:
-            target = int(TRACK_FADE_MAX * (seek_s / TRACK_FADE_IN_S))
+        end_ms = last_duration * 1000
+        if last_seek <= _fade_origin_seek_ms or end_ms <= _fade_origin_seek_ms:
+            target = TRACK_FADE_MAX
+        elif last_seek >= end_ms:
+            target = TRACK_FADE_MIN
         else:
-            duration_s = float(last_duration)
-            denom = max(0.001, duration_s - TRACK_FADE_IN_S)
-            progress = min(1.0, max(0.0, (seek_s - TRACK_FADE_IN_S) / denom))
+            progress = (last_seek - _fade_origin_seek_ms) / (end_ms - _fade_origin_seek_ms)
             target = int(TRACK_FADE_MAX - (TRACK_FADE_MAX - TRACK_FADE_MIN) * progress)
     target = max(0, min(255, target))
     if target == _last_contrast_set:
@@ -1250,8 +1270,12 @@ def _handle_pushstate(data):
                 last_duration = duration
                 last_event_wall = now
                 last_stop_wall = 0.0
+                if title_changed:
+                    _reset_brightness_fade(0, "new_track")
             elif state == "pause":
                 last_stop_wall = 0.0
+                if prev_status == "play":
+                    _reset_brightness_fade(last_seek, "pause")
             elif state == "stop":
                 if prev_status != "stop":
                     last_stop_wall = now
@@ -1405,6 +1429,9 @@ def _open_menu():
     _menu_entered_perf = time.perf_counter()
     _menu_last_input_perf = _menu_entered_perf
     log.info("menu: opening (return to %s on exit)", _menu_pre_screen)
+    # User just interacted — make sure the screen is bright, restart the fade
+    # over the remaining track time.
+    _reset_brightness_fade(last_seek, "menu_open")
     _menu_set_screen("menu")
 
 

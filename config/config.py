@@ -124,7 +124,7 @@ PIXEL_SHIFT_INTERVAL_S = float(_burnin.get("pixel_shift_interval_s", 180.0))
 TRACK_FADE_ENABLED = bool(_burnin.get("track_fade_enabled", True))
 TRACK_FADE_MAX = max(0, min(255, int(_burnin.get("track_fade_max", 255))))
 TRACK_FADE_MIN = max(0, min(255, int(_burnin.get("track_fade_min", 0))))
-TRACK_FADE_IN_S = float(_burnin.get("track_fade_in_s", 0.8))
+TRACK_FADE_MIN_REMAINING_S = float(_burnin.get("track_fade_min_remaining_s", 60.0))
 
 # --- Screensaver ---
 _ss_cfg = config.get("screensaver", {})
