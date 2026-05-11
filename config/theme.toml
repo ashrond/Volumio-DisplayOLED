@@ -72,6 +72,24 @@ quiet_hours_end   = 6          # 6:00 AM
 pixel_shift_enabled      = true
 pixel_shift_interval_s   = 180  # advance one position every 3 minutes
 
+# --- Scanline alternation ---
+# Dims alternating rows of the displayed frame and swaps which rows are dim
+# every alternation_interval_s. Each pixel spends roughly half its time at
+# reduced brightness, distributing wear temporally without changing the
+# global contrast register. Costs <1ms per frame. Visible as faint static
+# scanlines that quietly swap polarity on a slow cadence — should read as
+# texture, not flicker, at the default interval.
+scanline_alternation_enabled    = true
+scanline_dim_factor             = 0.7   # 0.0-1.0; how dim the alternate rows are (0.7 = 70% of full)
+scanline_alternation_interval_s = 45.0  # how long each phase persists before swapping
+
+# --- Initial / startup contrast ---
+# luma.oled defaults the contrast register to 127 (~50%), which reads as dim
+# once the scanline alternation kicks in over the top. This is the contrast
+# applied at process startup; the per-track fade takes over as soon as the
+# first play pushState arrives.
+startup_contrast = 200
+
 # --- Per-track brightness fade ---
 # Drives the SSD1322 contrast register (0-255) based on Volumio's playback
 # position within each track: brief fade-in at the start, then a linear taper

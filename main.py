@@ -41,6 +41,8 @@ from config.config import (
     MENU_TIMEOUT_SECONDS, MENU_IR_UDP_PORT,
     QUIET_HOURS_START, QUIET_HOURS_END,
     PIXEL_SHIFT_ENABLED, PIXEL_SHIFT_INTERVAL_S,
+    STARTUP_CONTRAST,
+    SCANLINE_ALT_ENABLED, SCANLINE_DIM_FACTOR, SCANLINE_ALT_INTERVAL_S,
     TRACK_FADE_ENABLED, TRACK_FADE_MAX, TRACK_FADE_MIN, TRACK_FADE_MIN_REMAINING_S,
 )
 from screens.startup import display_startup
@@ -69,6 +71,10 @@ SCREENSAVER_FRAME_PERIOD = 0.04
 # the stock implementation has a pure-Python per-pixel loop that dominates CPU.
 serial = spi(device=0, port=0, bus_speed_hz=8000000)
 device = ssd1322(serial)
+# Bump initial contrast above luma's 127 default so the startup gif reads
+# clearly through the scanline alternation. _update_track_brightness will
+# take over as soon as the first play pushState arrives.
+device.contrast(STARTUP_CONTRAST)
 
 
 # --- Fast device.display() override ---
@@ -88,6 +94,42 @@ except ImportError:
 
 _NIBBLE_FROM_BYTE = bytes(b >> 4 for b in range(256))            # 0..255 -> 0..15
 _NIBBLE_TO_HIGH   = bytes((b << 4) & 0xFF for b in range(256))   # 0..15  -> 0..240
+
+# --- Scanline alternation (burn-in mitigation) ---
+# Dims alternating rows of the rendered frame and swaps polarity every
+# SCANLINE_ALT_INTERVAL_S seconds. Each pixel spends ~50% of time at reduced
+# brightness, halving its effective wear without touching the global contrast.
+# Built once at module load: a 256-entry translate table mapping any byte to
+# its dimmed counterpart, clamped to the 4-bit nibble range.
+_SCANLINE_DIM_LUT = bytes(min(15, int(b * SCANLINE_DIM_FACTOR)) for b in range(256))
+_scanline_phase = 0
+_scanline_last_swap_perf = 0.0
+
+
+def _maybe_swap_scanline_phase():
+    global _scanline_phase, _scanline_last_swap_perf
+    if not SCANLINE_ALT_ENABLED:
+        return
+    now = time.perf_counter()
+    if now - _scanline_last_swap_perf >= SCANLINE_ALT_INTERVAL_S:
+        _scanline_phase = 1 - _scanline_phase
+        _scanline_last_swap_perf = now
+
+
+def _apply_scanline_dim_bytes(nibbles, seg_width, seg_height, screen_top):
+    """Dim every other SCREEN row in `nibbles` (one byte per pixel, value 0-15).
+    Uses screen_top so partial-region redraws stay consistent across the screen
+    (the framebuffer.redraw bbox can land anywhere)."""
+    if not SCANLINE_ALT_ENABLED or seg_height == 0:
+        return nibbles
+    rows = []
+    for r in range(seg_height):
+        row = nibbles[r * seg_width:(r + 1) * seg_width]
+        if ((screen_top + r) + _scanline_phase) % 2 == 1:
+            row = row.translate(_SCANLINE_DIM_LUT)
+        rows.append(row)
+    return b''.join(rows)
+
 
 # --- Pixel shift (burn-in mitigation) ---
 # Cycles the rendered frame by 1px through a 4-position pattern. Applied at
@@ -135,12 +177,19 @@ def _fast_greyscale_display_numpy(self, image):
     image = self.preprocess(image)
     _maybe_advance_pixel_shift()
     image = _apply_pixel_shift(image)
+    _maybe_swap_scanline_phase()
     nibble_order = self._nibble_order
     for _, bbox in self.framebuffer.redraw(image):
         left, top, right, bottom = self._inflate_bbox(bbox)
         seg = image.crop((left, top, right, bottom))
-        # RGB -> L (PIL C) -> uint8 numpy array, divided down to 4-bit values.
-        flat = (_np.asarray(seg.convert("L"), dtype=_np.uint8).ravel() >> 4)
+        # RGB -> L (PIL C) -> uint8 2D, divided down to 4-bit values.
+        arr2d = (_np.asarray(seg.convert("L"), dtype=_np.uint8) >> 4)
+        if SCANLINE_ALT_ENABLED and arr2d.shape[0] > 0:
+            screen_rows = _np.arange(arr2d.shape[0]) + top
+            dim_mask = ((screen_rows + _scanline_phase) & 1) == 1
+            # Scale dim rows by SCANLINE_DIM_FACTOR, clamped to nibble range.
+            arr2d[dim_mask] = (arr2d[dim_mask].astype(_np.uint16) * int(SCANLINE_DIM_FACTOR * 256) // 256).astype(_np.uint8)
+        flat = arr2d.ravel()
         if nibble_order == 0:
             packed = (flat[0::2] << 4) | flat[1::2]
         else:
@@ -155,11 +204,13 @@ def _fast_greyscale_display_bytes(self, image):
     image = self.preprocess(image)
     _maybe_advance_pixel_shift()
     image = _apply_pixel_shift(image)
+    _maybe_swap_scanline_phase()
     nibble_order = self._nibble_order
     for _, bbox in self.framebuffer.redraw(image):
         left, top, right, bottom = self._inflate_bbox(bbox)
         seg = image.crop((left, top, right, bottom))
         nibbles = seg.convert("L").tobytes().translate(_NIBBLE_FROM_BYTE)
+        nibbles = _apply_scanline_dim_bytes(nibbles, right - left, bottom - top, top)
         if nibble_order == 0:
             highs = nibbles[0::2].translate(_NIBBLE_TO_HIGH)
             lows  = nibbles[1::2]
@@ -545,20 +596,28 @@ def _update_track_brightness():
         target = TRACK_FADE_MAX
     else:
         end_ms = last_duration * 1000
-        if last_seek <= _fade_origin_seek_ms or end_ms <= _fade_origin_seek_ms:
+        # Volumio sends pushStates in bursts at track changes and then goes
+        # silent during the track itself, so `last_seek` is usually stale by
+        # minutes. Extrapolate from `last_event_wall` (set on each play
+        # pushState) so the fade actually progresses during long tracks.
+        if last_status == "play" and last_event_wall > 0:
+            seek_ms = last_seek + int((time.time() - last_event_wall) * 1000)
+            if seek_ms > end_ms:
+                seek_ms = end_ms
+        else:
+            seek_ms = last_seek
+        if seek_ms <= _fade_origin_seek_ms or end_ms <= _fade_origin_seek_ms:
             target = TRACK_FADE_MAX
-        elif last_seek >= end_ms:
+        elif seek_ms >= end_ms:
             target = TRACK_FADE_MIN
         else:
-            progress = (last_seek - _fade_origin_seek_ms) / (end_ms - _fade_origin_seek_ms)
+            progress = (seek_ms - _fade_origin_seek_ms) / (end_ms - _fade_origin_seek_ms)
             target = int(TRACK_FADE_MAX - (TRACK_FADE_MAX - TRACK_FADE_MIN) * progress)
     target = max(0, min(255, target))
     if target == _last_contrast_set:
         return
     try:
         device.contrast(target)
-        log.info("brightness: contrast=%d (seek=%dms origin=%dms duration=%ds status=%s)",
-                 target, last_seek, _fade_origin_seek_ms, last_duration, last_status)
         _last_contrast_set = target
     except Exception as e:
         log.warning("device.contrast(%d) failed: %s", target, e)
