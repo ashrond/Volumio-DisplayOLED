@@ -557,6 +557,8 @@ def _update_track_brightness():
         return
     try:
         device.contrast(target)
+        log.info("brightness: contrast=%d (seek=%dms origin=%dms duration=%ds status=%s)",
+                 target, last_seek, _fade_origin_seek_ms, last_duration, last_status)
         _last_contrast_set = target
     except Exception as e:
         log.warning("device.contrast(%d) failed: %s", target, e)
