@@ -73,7 +73,13 @@ _log_backup_count = int(_log_cfg.get("backup_count", 3))
 log = logging.getLogger("vfd")
 log.handlers = []
 log.propagate = False
-if _log_enabled:
+# Tools that import config.config purely to read settings (e.g. tools/admin.py)
+# set VFD_NO_LOG to suppress side effects — no stream handler, no file handler,
+# no "loaded theme …" line in /tmp/vfd.log per CLI invocation.
+if os.environ.get("VFD_NO_LOG"):
+    log.setLevel(logging.CRITICAL + 1)
+    log.addHandler(logging.NullHandler())
+elif _log_enabled:
     log.setLevel(_log_level)
     _fmt = logging.Formatter("%(asctime)s.%(msecs)03d %(levelname)-5s %(message)s",
                              datefmt="%H:%M:%S")
@@ -185,6 +191,17 @@ else:
     _theme = _default_theme
     log.info("loaded theme 'default'")
 
+# Warn (don't refuse) if the active theme wasn't designed for the panel
+# currently configured. Lets users experiment but flags the layout mismatch.
+# A theme can opt in to multi-screen support by listing all panels it supports;
+# absence of `supported_screens` means "any" and disables the check.
+_supported = _theme.get("meta", {}).get("supported_screens")
+if _supported:
+    _supported_lc = [str(s).lower() for s in _supported]
+    if DEVICE_TYPE.lower() not in _supported_lc:
+        log.warning("theme %r supports %s but [display] type is %r — layout may not fit",
+                    ACTIVE_THEME, _supported, DEVICE_TYPE)
+
 
 def _asset_path(canonical_filename):
     """Resolve an asset filename to a full path. Looks in the active theme's
@@ -197,11 +214,11 @@ def _asset_path(canonical_filename):
     active_path = os.path.join(_themes_dir, ACTIVE_THEME, "assets", actual)
     if os.path.exists(active_path):
         return active_path
-    default_path = os.path.join(_themes_dir, DEFAULT_THEME_NAME, "assets", canonical_filename)
-    if not os.path.exists(default_path):
-        log.warning("asset %r not found in theme %r or default theme",
-                    canonical_filename, ACTIVE_THEME)
-    return default_path
+    # Fall through to the default theme. We don't warn here — many assets
+    # are optional (idle.gif when in procedural mode, etc.). Callers that
+    # actually try to load a missing file get a clear "GIF not found"
+    # message from _load_frames, and _paint_idle gracefully degrades.
+    return os.path.join(_themes_dir, DEFAULT_THEME_NAME, "assets", canonical_filename)
 
 
 # Fonts (theme-defined point sizes, system-defined path)

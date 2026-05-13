@@ -21,8 +21,6 @@ import urllib.parse
 import socketio
 import json
 import logging
-from luma.core.interface.serial import spi
-from luma.oled.device import ssd1322
 from luma.core.render import canvas
 from PIL import Image, ImageSequence, ImageDraw, ImageChops
 
@@ -71,171 +69,28 @@ from screens.playback import display_playback_screen, needs_marquee
 from screens import screensaver, screensaver_replay
 from screens.menu import paint_menu
 
-# --- SPI device ---
-# SSD1322 supports 4-bit (16-level) grayscale. luma.core only accepts modes
-# "1", "RGB", "RGBA" — there's no "L" option (verified 2026-05-10). So we keep
-# RGB and override display() with a vectorized RGB→4bpp conversion below;
-# the stock implementation has a pure-Python per-pixel loop that dominates CPU.
-serial = spi(device=SPI_CS, port=SPI_BUS, bus_speed_hz=SPI_SPEED_HZ)
-if DEVICE_TYPE == "ssd1322":
-    device = ssd1322(serial)
-else:
-    raise RuntimeError("Unsupported display.type=%r — only 'ssd1322' is wired up. "
-                       "Edit runtime.toml [display] type or extend main.py." % DEVICE_TYPE)
+# --- Display device ---
+# Built by the factory in screens/devices/. The Device wrapper presents a
+# uniform API regardless of panel type and sets `is_oled` so the orchestrator
+# can gate OLED-only behavior (contrast fade, hide()/show() hardware sleep).
+# Panel-specific optimizations like scanline alternation, pixel shift, and the
+# vectorized RGB→4bpp converter live INSIDE the SSD1322Device subclass; the
+# rest of main.py just calls device.display(img) and trusts the wrapper.
+from screens.devices import create_device
+
+device = create_device(
+    device_type=DEVICE_TYPE,
+    width=DEVICE_WIDTH,
+    height=DEVICE_HEIGHT,
+    spi_bus=SPI_BUS,
+    spi_cs=SPI_CS,
+    spi_speed_hz=SPI_SPEED_HZ,
+)
 # Bump initial contrast above luma's 127 default so the startup gif reads
-# clearly through the scanline alternation. _update_track_brightness will
-# take over as soon as the first play pushState arrives.
-device.contrast(STARTUP_CONTRAST)
-
-
-# --- Fast device.display() override ---
-# The stock luma greyscale renderer iterates every pixel in Python doing
-# `grey = (r*306 + g*601 + b*117) >> 14` plus nibble packing. On a Pi 0w2
-# that's ~80ms for a full-screen frame — the dominant cost in our render path.
-# We replace it with vectorized C-level ops. Two implementations:
-#   - numpy path (preferred): clearest and fastest
-#   - bytes/int fallback: works without numpy, still much faster than stock
-# Both keep the framebuffer.redraw() dirty-region logic intact.
-import types as _types
-try:
-    import numpy as _np
-    _HAVE_NUMPY = True
-except ImportError:
-    _HAVE_NUMPY = False
-
-_NIBBLE_FROM_BYTE = bytes(b >> 4 for b in range(256))            # 0..255 -> 0..15
-_NIBBLE_TO_HIGH   = bytes((b << 4) & 0xFF for b in range(256))   # 0..15  -> 0..240
-
-# --- Scanline alternation (burn-in mitigation) ---
-# Dims alternating rows of the rendered frame and swaps polarity every
-# SCANLINE_ALT_INTERVAL_S seconds. Each pixel spends ~50% of time at reduced
-# brightness, halving its effective wear without touching the global contrast.
-# Built once at module load: a 256-entry translate table mapping any byte to
-# its dimmed counterpart, clamped to the 4-bit nibble range.
-_SCANLINE_DIM_LUT = bytes(min(15, int(b * SCANLINE_DIM_FACTOR)) for b in range(256))
-_scanline_phase = 0
-_scanline_last_swap_perf = 0.0
-
-
-def _maybe_swap_scanline_phase():
-    global _scanline_phase, _scanline_last_swap_perf
-    if not SCANLINE_ALT_ENABLED:
-        return
-    now = time.perf_counter()
-    if now - _scanline_last_swap_perf >= SCANLINE_ALT_INTERVAL_S:
-        _scanline_phase = 1 - _scanline_phase
-        _scanline_last_swap_perf = now
-
-
-def _apply_scanline_dim_bytes(nibbles, seg_width, seg_height, screen_top):
-    """Dim every other SCREEN row in `nibbles` (one byte per pixel, value 0-15).
-    Uses screen_top so partial-region redraws stay consistent across the screen
-    (the framebuffer.redraw bbox can land anywhere)."""
-    if not SCANLINE_ALT_ENABLED or seg_height == 0:
-        return nibbles
-    rows = []
-    for r in range(seg_height):
-        row = nibbles[r * seg_width:(r + 1) * seg_width]
-        if ((screen_top + r) + _scanline_phase) % 2 == 1:
-            row = row.translate(_SCANLINE_DIM_LUT)
-        rows.append(row)
-    return b''.join(rows)
-
-
-# --- Pixel shift (burn-in mitigation) ---
-# Cycles the rendered frame by 1px through a 4-position pattern. Applied at
-# the lowest level — just before SPI — so the rest of the render path is
-# blissfully unaware. Adds a single paste per frame (~0.5ms).
-_PIXEL_SHIFT_POSITIONS = ((0, 0), (1, 0), (1, 1), (0, 1))
-_pixel_shift_idx = 0
-_pixel_shift_last_change_perf = 0.0
-_shift_canvas = None
-
-
-def _maybe_advance_pixel_shift():
-    global _pixel_shift_idx, _pixel_shift_last_change_perf
-    if not PIXEL_SHIFT_ENABLED:
-        return
-    now = time.perf_counter()
-    if now - _pixel_shift_last_change_perf >= PIXEL_SHIFT_INTERVAL_S:
-        _pixel_shift_idx = (_pixel_shift_idx + 1) % len(_PIXEL_SHIFT_POSITIONS)
-        _pixel_shift_last_change_perf = now
-
-
-def _apply_pixel_shift(image):
-    """Return image shifted by the current pixel-shift offset, or the original
-    image if no shift is active. Reuses a single canvas to avoid per-frame
-    allocation."""
-    global _shift_canvas
-    if not PIXEL_SHIFT_ENABLED:
-        return image
-    ox, oy = _PIXEL_SHIFT_POSITIONS[_pixel_shift_idx]
-    if ox == 0 and oy == 0:
-        return image
-    if (_shift_canvas is None
-            or _shift_canvas.size != image.size
-            or _shift_canvas.mode != image.mode):
-        _shift_canvas = Image.new(image.mode, image.size, "black")
-    ImageDraw.Draw(_shift_canvas).rectangle(
-        (0, 0, image.size[0], image.size[1]), fill="black")
-    _shift_canvas.paste(image, (ox, oy))
-    return _shift_canvas
-
-
-def _fast_greyscale_display_numpy(self, image):
-    assert image.mode == self.mode
-    assert image.size == self.size
-    image = self.preprocess(image)
-    _maybe_advance_pixel_shift()
-    image = _apply_pixel_shift(image)
-    _maybe_swap_scanline_phase()
-    nibble_order = self._nibble_order
-    for _, bbox in self.framebuffer.redraw(image):
-        left, top, right, bottom = self._inflate_bbox(bbox)
-        seg = image.crop((left, top, right, bottom))
-        # RGB -> L (PIL C) -> uint8 2D, divided down to 4-bit values.
-        arr2d = (_np.asarray(seg.convert("L"), dtype=_np.uint8) >> 4)
-        if SCANLINE_ALT_ENABLED and arr2d.shape[0] > 0:
-            screen_rows = _np.arange(arr2d.shape[0]) + top
-            dim_mask = ((screen_rows + _scanline_phase) & 1) == 1
-            # Scale dim rows by SCANLINE_DIM_FACTOR, clamped to nibble range.
-            arr2d[dim_mask] = (arr2d[dim_mask].astype(_np.uint16) * int(SCANLINE_DIM_FACTOR * 256) // 256).astype(_np.uint8)
-        flat = arr2d.ravel()
-        if nibble_order == 0:
-            packed = (flat[0::2] << 4) | flat[1::2]
-        else:
-            packed = (flat[1::2] << 4) | flat[0::2]
-        self._set_position(top, right, bottom, left)
-        self.data(packed.tolist())
-
-
-def _fast_greyscale_display_bytes(self, image):
-    assert image.mode == self.mode
-    assert image.size == self.size
-    image = self.preprocess(image)
-    _maybe_advance_pixel_shift()
-    image = _apply_pixel_shift(image)
-    _maybe_swap_scanline_phase()
-    nibble_order = self._nibble_order
-    for _, bbox in self.framebuffer.redraw(image):
-        left, top, right, bottom = self._inflate_bbox(bbox)
-        seg = image.crop((left, top, right, bottom))
-        nibbles = seg.convert("L").tobytes().translate(_NIBBLE_FROM_BYTE)
-        nibbles = _apply_scanline_dim_bytes(nibbles, right - left, bottom - top, top)
-        if nibble_order == 0:
-            highs = nibbles[0::2].translate(_NIBBLE_TO_HIGH)
-            lows  = nibbles[1::2]
-        else:
-            highs = nibbles[1::2].translate(_NIBBLE_TO_HIGH)
-            lows  = nibbles[0::2]
-        n = len(lows)
-        packed = (int.from_bytes(highs, "big") | int.from_bytes(lows, "big")).to_bytes(n, "big")
-        self._set_position(top, right, bottom, left)
-        self.data(list(packed))
-
-
-_fast_display_impl = _fast_greyscale_display_numpy if _HAVE_NUMPY else _fast_greyscale_display_bytes
-device.display = _types.MethodType(_fast_display_impl, device)
+# clearly through scanline alternation. Track-fade takes over once playback
+# begins. No-op on non-OLED panels (Device.contrast handles the absence).
+if device.is_oled:
+    device.contrast(STARTUP_CONTRAST)
 
 # --- Screen-change crossfade ---
 # Wrap device.display() so that whenever a screen change is signaled (via
@@ -592,7 +447,9 @@ def _update_track_brightness():
     origin and MIN at end-of-track; for seek positions before the origin, also
     MAX. Throttled to 1 Hz."""
     global _last_contrast_set, _last_contrast_update_perf
-    if not TRACK_FADE_ENABLED:
+    # OLED-only: TFTs don't expose contrast control in a useful way and
+    # don't suffer per-pixel burn-in, so the whole fade machinery is a no-op.
+    if not TRACK_FADE_ENABLED or not device.is_oled:
         return
     now = time.perf_counter()
     if now - _last_contrast_update_perf < _CONTRAST_UPDATE_INTERVAL_S:
@@ -702,15 +559,19 @@ def _load_frames(path, resize_to_screen):
 
 def _prewarm_gifs():
     """Decode all animated GIFs into memory at startup, so first-use paints don't stall.
-    Cache key is path-only, so the resize_to_screen flag here MUST match the painters'."""
-    _load_frames(GIF_PATH_LOADING, resize_to_screen=True)
-    _load_frames(GIF_PATH_IDLE, resize_to_screen=True)
-    _load_frames(GIF_PATH_PLAY_TO_PAUSE, resize_to_screen=True)
-    _load_frames(GIF_PATH_PAUSE_TO_PLAY, resize_to_screen=True)
-    # Skip GIFs are small overlays (92x60) — keep their native size, do NOT
-    # stretch them to fill the screen. They'll be pasted with translation.
-    _load_frames(GIF_PATH_SKIP_FORWARD, resize_to_screen=False)
-    _load_frames(GIF_PATH_SKIP_BACKWARD, resize_to_screen=False)
+    Cache key is path-only, so the resize_to_screen flag here MUST match the painters'.
+    Missing assets are skipped silently — the theme may legitimately omit them
+    (e.g. default theme has no idle.gif because procedural mode is the default)."""
+    fullscreen_assets = [GIF_PATH_LOADING, GIF_PATH_IDLE,
+                         GIF_PATH_PLAY_TO_PAUSE, GIF_PATH_PAUSE_TO_PLAY]
+    overlay_assets    = [GIF_PATH_SKIP_FORWARD, GIF_PATH_SKIP_BACKWARD]
+    for p in fullscreen_assets:
+        if os.path.exists(p):
+            _load_frames(p, resize_to_screen=True)
+    # Skip GIFs are small overlays (92x60) — native size, NOT stretched.
+    for p in overlay_assets:
+        if os.path.exists(p):
+            _load_frames(p, resize_to_screen=False)
     _build_loading_resized_frames()
 
 

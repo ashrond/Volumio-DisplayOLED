@@ -7,6 +7,10 @@ python-socketio>=4.6.0,<5
 luma.oled>=3.13.0,<4
 Pillow>=9.0,<11
 toml>=0.10
+# Comment-preserving TOML writer for tools/admin.py — the future WebUI
+# plugin will write runtime.toml, and we want hand-edited comments and
+# section ordering to survive round-trips.
+tomlkit>=0.11
 # numpy is OPTIONAL. The display() override in main.py auto-selects between
 # a numpy path and a bytes-only fallback at startup. The bytes fallback is
 # already ~5x faster than the stock luma renderer; numpy gives a small

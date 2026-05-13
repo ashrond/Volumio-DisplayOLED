@@ -8,6 +8,11 @@ version        = "1.0"
 author         = "ashrond"
 description    = "Default theme shipped with the display."
 schema_version = 1
+# Which screen types this theme was designed for. The loader warns (does
+# not refuse) if runtime.toml's [display] type isn't in the list. Layouts
+# here are dimensioned for 256x64 (SSD1322). A multi-screen theme would
+# list every panel it supports, e.g. ["ssd1322", "ili9341"].
+supported_screens = ["ssd1322"]
 
 [fonts]
 time           = 24

@@ -141,8 +141,8 @@ End state in the Volumio plugin UI:
 - [x] Phase 2: Settings/runtime config split (replace theme.toml)
 - [x] Phase 3: Theme loader with default fallback
 - [x] Phase 4: Asset path refactor (remove hardcoded `assets/`)
-- [ ] Phase 5a: Screen abstraction — `screens/devices/{base,oled_ssd1322,tft_ili9341}.py`, capability flags, theme `target_screen` tag, ILI9341 stub
-- [ ] Phase 5b: `tools/admin.py` — CLI bridge the WebUI plugin shells out to
+- [x] Phase 5a: Screen abstraction — `screens/devices/{base,oled_ssd1322,tft_ili9341}.py`, capability flags, theme `supported_screens` tag, ILI9341 stub. Done 2026-05-13.
+- [x] Phase 5b: `tools/admin.py` — CLI bridge the WebUI plugin shells out to. Done 2026-05-13. Commands: list-themes, set-theme, validate-theme, upload-theme, delete-theme, list-devices, get-runtime, set-runtime, status, restart. Comment-preserving `runtime.toml` writes via tomlkit (added to requirements). Quiet mode via `VFD_NO_LOG=1` keeps admin CLI invocations out of `/tmp/vfd.log`.
 - [ ] Phase 5c: Refactor `main.py` to use device factory; gate burn-in mitigations on `device.is_oled`
 - [ ] Phase 6: Plugin scaffolding (`plugin/` subfolder) — index.js, package.json, UIConfig.json, install.sh, i18n
 - [ ] Phase 7: Plugin — theme list/upload/delete handlers
@@ -232,3 +232,8 @@ A handful of "we'd do this differently if starting from scratch" items, ranked b
 - **2026-05-13 — Display push path: stay with luma.oled + `_fast_greyscale_display_*` override.** Audited alternatives (fbtft, direct spidev, native C extension); none offer meaningful CPU/complexity wins at current load (5.1% lifetime, 11% peak). luma also covers ILI9341 and many other panels out of the box, which makes the screen-abstraction phase easier.
 - **2026-05-13 — Node ↔ Python comms: filesystem + systemctl + `tools/admin.py` CLI. No HTTP API.** Plugin writes `runtime.toml`, restarts the service for settings changes; shells out to `admin.py` for theme operations that need Python-side validation. HTTP API can be added later as a layer on top if hot-reload-without-restart becomes important — additive, not a rewrite.
 - **2026-05-13 — We call Volumio's APIs (socketio + REST); Volumio does NOT call us.** One-directional. Don't confuse "we use Volumio's API" with "we expose an API."
+- **2026-05-13 — Themes declare `[meta] supported_screens = [...]` (list, not single string).** Forward-compatible with multi-screen themes when a second panel ships. Per-screen layout overrides (e.g. `[layout.playback.ili9341]`) deferred — add when a real TFT exists to validate against.
+- **2026-05-13 — `Device.category` ("OLED" / "TFT") class attribute.** Lets the future WebUI's two-stage selector (category → specific chip) populate itself from whatever drivers are present, with no separate registry to maintain.
+- **2026-05-13 — Install-time screen selector reaffirmed as WebUI-only.** Default install = `ssd1322`; user picks anything else via the plugin settings page.
+- **2026-05-13 — `tomlkit` added to requirements** for comment-preserving runtime.toml writes via `tools/admin.py`. Plain `toml` is still used for read-only parsing in `config/config.py` (hot path) where comment preservation doesn't matter.
+- **2026-05-13 — `VFD_NO_LOG=1` env-var convention.** Anything that imports `config.config` but isn't the main display program (admin CLI, future test harnesses, simulation device) sets this to suppress log handler installation. Keeps `/tmp/vfd.log` clean of per-invocation noise.
