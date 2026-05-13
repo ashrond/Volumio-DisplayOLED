@@ -54,6 +54,8 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 GIF_PATH_IDLE = os.path.join(_HERE, "assets/idle.gif")
 GIF_PATH_PLAY_TO_PAUSE = os.path.join(_HERE, "assets/play-to-pause.gif")
 GIF_PATH_PAUSE_TO_PLAY = os.path.join(_HERE, "assets/pause-to-play.gif")
+GIF_PATH_SKIP_FORWARD = os.path.join(_HERE, "assets/skip-forward.gif")
+GIF_PATH_SKIP_BACKWARD = os.path.join(_HERE, "assets/skip-backward.gif")
 # Note: pause.gif is intentionally retired; idle.gif is now the universal
 # screensaver content for both pause and stop states.
 VOLUMIO_WS_URL = "http://localhost:3000"
@@ -529,6 +531,7 @@ last_event_wall = 0.0           # time of most recent play pushState
 last_volume_event_wall = 0.0    # time of most recent volume change
 last_stop_wall = 0.0            # time when status=stop first seen
 last_status_change_wall = 0.0   # time of last status (play/pause/stop) transition — for IR-bounce debounce
+last_title_change_wall = 0.0    # time of last title change — gates the volume-at-limit heuristic against track-change pushState bursts
 volume_initialized = False
 PAUSE_TO_PLAY_DEBOUNCE = PAUSE_TO_PLAY_DEBOUNCE_SECONDS
 render_wake = threading.Event()
@@ -662,11 +665,19 @@ def _load_frames(path, resize_to_screen):
     try:
         with Image.open(path) as gif:
             frames = []
+            n = 0
             for f in ImageSequence.Iterator(gif):
-                # Convert in the GIF's own palette space first to compose any
-                # transparency cleanly, THEN to the device's mode so paste()
-                # later is a direct copy (no per-paint conversion cost).
-                frame = f.convert(device.mode)
+                n += 1
+                try:
+                    # Force the frame through RGBA first to materialize the
+                    # actual rendered pixels — bypasses the "image has no
+                    # palette" error some GIFs trigger when disposal/blit
+                    # leaves the frame in an indeterminate palette state.
+                    frame = f.convert("RGBA").convert(device.mode)
+                except Exception as fe:
+                    log.warning("GIF %s frame %d conversion failed (%s), skipping",
+                                os.path.basename(path), n, fe)
+                    continue
                 if resize_to_screen and frame.size != (device.width, device.height):
                     frame = frame.resize((device.width, device.height), Image.LANCZOS)
                 frames.append(frame)
@@ -690,6 +701,29 @@ def _prewarm_gifs():
     _load_frames(GIF_PATH_IDLE, resize_to_screen=True)
     _load_frames(GIF_PATH_PLAY_TO_PAUSE, resize_to_screen=True)
     _load_frames(GIF_PATH_PAUSE_TO_PLAY, resize_to_screen=True)
+    # Skip GIFs are small overlays (92x60) — keep their native size, do NOT
+    # stretch them to fill the screen. They'll be pasted with translation.
+    _load_frames(GIF_PATH_SKIP_FORWARD, resize_to_screen=False)
+    _load_frames(GIF_PATH_SKIP_BACKWARD, resize_to_screen=False)
+    _build_loading_resized_frames()
+
+
+# Loading screen layout: text at top with margin, GIF resized shorter and
+# positioned in the lower half so there's a clear gap between them.
+_LOADING_TEXT_Y = 4
+_LOADING_GIF_HEIGHT = 36
+_LOADING_GIF_Y = 24
+_loading_resized_frames = []
+
+
+def _build_loading_resized_frames():
+    """Pre-resize the loading.gif frames to the layout-specific height so the
+    per-paint cost is just a paste. Called from _prewarm_gifs at startup."""
+    global _loading_resized_frames
+    src = _frame_cache.get(GIF_PATH_LOADING) or []
+    _loading_resized_frames = [
+        f.resize((device.width, _LOADING_GIF_HEIGHT), Image.LANCZOS) for f in src
+    ]
 
 
 def _coerce_int(v, default):
@@ -721,19 +755,16 @@ def _paint_volume(volume):
 
 
 def _paint_loading(idx, error=""):
-    frames = _load_frames(GIF_PATH_LOADING, resize_to_screen=True)
-    if not frames:
+    if not _loading_resized_frames:
         return
-    f = frames[idx % len(frames)]
-    # Build the image directly in device mode so we can paste the GIF frame
-    # at full intensity (preserving grayscale), then draw text overlays on top.
+    f = _loading_resized_frames[idx % len(_loading_resized_frames)]
     img = Image.new(device.mode, (device.width, device.height), "black")
-    img.paste(f, (0, 0))
+    img.paste(f, (0, _LOADING_GIF_Y))  # GIF in lower portion of the screen
     draw = ImageDraw.Draw(img)
     text = "LOADING"
     tw = font_title.getbbox(text)[2]
     tx = (device.width - tw) // 2
-    draw.text((tx, 0), text, font=font_title, fill="white")
+    draw.text((tx, _LOADING_TEXT_Y), text, font=font_title, fill="white")
     if error:
         ew = font_artist.getbbox(error)[2]
         ex = (device.width - ew) // 2
@@ -794,6 +825,64 @@ def _paint_transition_overlay(symbol_frame, behind, ahead, alpha, symbol_env):
         symbol = symbol_frame.point(lambda v, m=scale: (v * m) // 255)
     composite = ImageChops.lighter(bg, symbol)
     device.display(composite)
+
+
+def _paint_skip_transition(symbol_frame, behind, x_pos, y_pos, symbol_env):
+    """Compose the skip-forward / skip-back overlay: `behind` stays as the
+    playback frame, the 92x60 skip symbol is pasted at (x_pos, y_pos) — which
+    may be negative or off-right-edge during the slide-off phase — and
+    combined with ImageChops.lighter so the GIF's black areas don't black-out
+    the underlying screen."""
+    bg = behind if behind is not None else Image.new(device.mode, (device.width, device.height), "black")
+    stage = Image.new(device.mode, (device.width, device.height), "black")
+    # Combined envelope + brightness boost in a single point() pass.
+    # scale = 255 → 1× brightness; >255 brightens further; clipped to 255.
+    scale = max(0, int(255 * symbol_env * SKIP_GIF_BRIGHTNESS_BOOST))
+    if scale == 255:
+        scaled = symbol_frame
+    else:
+        scaled = symbol_frame.point(lambda v, m=scale: min(255, (v * m) // 255))
+    stage.paste(scaled, (x_pos, y_pos))  # PIL clips out-of-bounds automatically
+    composite = ImageChops.lighter(bg, stage)
+    device.display(composite)
+
+
+# --- Skip transition tuning ---
+# Frame-based timing. The skip GIFs are authored at ~10 fps and have an
+# internal two-phase animation: phase 1 = first arrow flies, phase 2 = a
+# second arrow appears behind. We want the slide-off to START at the
+# transition between phases so phase 2 happens *during* the slide, which
+# reads as "the arrow being pushed off by the next one".
+SKIP_GIF_FRAME_PERIOD_S = 0.173     # ~5.8 fps (60% slower than the 10fps native)
+SKIP_SLIDE_TRIGGER_FRAC = 0.25      # slide begins at ~0.25s into GIF playback
+SKIP_SLIDE_DURATION_S = 0.5         # how long the slide-off takes once triggered
+# Source GIFs are darker than the play/pause GIFs and disappear under the
+# playback screen's bright text when blended with ImageChops.lighter.
+# Multiplicative pixel-value boost; clipped to 255.
+SKIP_GIF_BRIGHTNESS_BOOST = 2.0
+# A "skip burst" is a string of presses each within this many seconds of the
+# last. Only the first press of a burst plays the animation; subsequent
+# presses still fire their volumio next/previous commands. Each press
+# extends the cooldown — keep tapping and you'll see one animation no matter
+# how many tracks you skip past.
+SKIP_ANIM_COOLDOWN_S = 3.0
+_last_skip_anim_perf = 0.0
+
+
+def _start_skip_transition(direction):
+    """direction: 'forward' or 'back'. Fires the skip GIF animation unless
+    a recent skip is still within the burst cooldown — every call refreshes
+    the cooldown so rapid tapping shares one animation."""
+    global _last_skip_anim_perf
+    now = time.perf_counter()
+    in_cooldown = now - _last_skip_anim_perf < SKIP_ANIM_COOLDOWN_S
+    _last_skip_anim_perf = now
+    if in_cooldown:
+        return
+    target = "transition_skip_forward" if direction == "forward" else "transition_skip_back"
+    with state_lock:
+        if current_screen != target:
+            _set_screen_unsafe(target)
 
 
 def _render_playback_image():
@@ -908,32 +997,42 @@ def _render_loop_inner():
         # outside play/pause; throttled internally to 1 Hz).
         _update_track_brightness()
 
-        # Burn-in mitigation: quiet hours force the panel into screen_off.
-        # On exit we wake to whatever screen makes sense for current state.
+        # Burn-in mitigation: quiet hours force the panel into screen_off,
+        # except when the user has the menu open (so the remote stays usable
+        # at night). When they close the menu it returns to _menu_pre_screen
+        # (== screen_off if menu was opened during quiet hours), and the
+        # gate kicks it back here naturally.
         in_quiet = _in_quiet_hours()
-        if in_quiet and current_screen != "screen_off":
-            with state_lock:
-                if current_screen != "screen_off":
-                    log.info("entering quiet hours (%02d:00–%02d:00), -> screen_off",
-                             QUIET_HOURS_START, QUIET_HOURS_END)
-                    _set_screen_unsafe("screen_off")
+        # Screens we allow to stay visible during quiet hours: screen_off
+        # (the default), menu (user opened it), and the play/pause transition
+        # GIFs (so remote button presses still get visual feedback).
+        QUIET_OK_SCREENS = ("screen_off", "menu",
+                            "transition_to_pause", "transition_to_play",
+                            "transition_skip_forward", "transition_skip_back")
+        if in_quiet:
+            if current_screen not in QUIET_OK_SCREENS:
+                with state_lock:
+                    if current_screen not in QUIET_OK_SCREENS:
+                        log.info("entering quiet hours (%02d:00–%02d:00), -> screen_off",
+                                 QUIET_HOURS_START, QUIET_HOURS_END)
+                        _set_screen_unsafe("screen_off")
+                _was_in_quiet_hours = True
+                continue
             _was_in_quiet_hours = True
-            continue
-        if _was_in_quiet_hours and not in_quiet:
-            wake_target = "playback" if last_status == "play" else "idle"
+        elif _was_in_quiet_hours:
+            # Quiet hours just ended. Wake if we can; if the user happens to
+            # be in the menu, leave _was_in_quiet_hours set and try again
+            # next tick (after they close the menu and we land in screen_off).
             woke = False
             with state_lock:
                 if current_screen == "screen_off":
+                    wake_target = "playback" if last_status == "play" else "idle"
                     log.info("quiet hours ended, -> %s", wake_target)
                     _set_screen_unsafe(wake_target)
                     woke = True
-            _was_in_quiet_hours = False
+                    _was_in_quiet_hours = False
             if woke:
-                # Skip the rest of this tick — `screen` is still the stale
-                # "screen_off" value and would re-hide the panel we just woke.
-                continue
-        else:
-            _was_in_quiet_hours = in_quiet
+                continue  # avoid stale `screen` painting screen_off this tick
 
         # Auto-transition: idle has been showing for too long → fade to black + sleep panel.
         # The `last_painted_screen == "idle"` gate prevents this from firing on the FIRST
@@ -972,7 +1071,8 @@ def _render_loop_inner():
             elif screen == "loading":
                 loading_idx = 0
                 last_loading_paint = 0
-            elif screen in ("transition_to_pause", "transition_to_play"):
+            elif screen in ("transition_to_pause", "transition_to_play",
+                            "transition_skip_forward", "transition_skip_back"):
                 transition_idx = 0
                 last_transition_paint = 0
                 _transition_behind_img = _last_displayed.copy() if _last_displayed is not None else None
@@ -1024,7 +1124,7 @@ def _render_loop_inner():
                     if progress >= 1.0:
                         with state_lock:
                             if current_screen == "transition_to_pause":
-                                _set_screen_unsafe("idle")
+                                _set_screen_unsafe("screen_off" if _in_quiet_hours() else "idle")
                     else:
                         # GIF frames advance at GIF rate; cap at last frame
                         # during the hold-at-end period.
@@ -1066,7 +1166,7 @@ def _render_loop_inner():
                     if progress >= 1.0:
                         with state_lock:
                             if current_screen == "transition_to_play":
-                                _set_screen_unsafe("playback")
+                                _set_screen_unsafe("screen_off" if _in_quiet_hours() else "playback")
                     else:
                         sym_idx = min(int(elapsed / GIF_FRAME_PERIOD), len(frames) - 1)
                         if progress < TRANSITION_FADE_PORTION:
@@ -1094,6 +1194,57 @@ def _render_loop_inner():
                         _timed_paint("trans-to-play", _paint_transition_overlay,
                                      frames[sym_idx], behind,
                                      _transition_ahead_img, progress, symbol_env)
+                        transition_idx = sym_idx
+
+            elif screen in ("transition_skip_forward", "transition_skip_back"):
+                forward = (screen == "transition_skip_forward")
+                gif_path = GIF_PATH_SKIP_FORWARD if forward else GIF_PATH_SKIP_BACKWARD
+                frames = _load_frames(gif_path, resize_to_screen=False)
+                if not frames:
+                    # Asset missing or unreadable — don't get stuck. Skip
+                    # directly to the post-transition target.
+                    log.warning("skip GIF unavailable (%s); bailing transition", gif_path)
+                    with state_lock:
+                        if current_screen == screen:
+                            _set_screen_unsafe("screen_off" if _in_quiet_hours() else "playback")
+                else:
+                    elapsed = time.perf_counter() - _transition_start_perf
+                    total_frames = len(frames)
+                    slide_trigger_frame = int(total_frames * SKIP_SLIDE_TRIGGER_FRAC)
+                    slide_start_time = slide_trigger_frame * SKIP_GIF_FRAME_PERIOD_S
+                    slide_end_time = slide_start_time + SKIP_SLIDE_DURATION_S
+                    if elapsed >= slide_end_time:
+                        with state_lock:
+                            if current_screen == screen:
+                                _set_screen_unsafe("screen_off" if _in_quiet_hours() else "playback")
+                    else:
+                        # GIF advances at native rate throughout — phase 2
+                        # plays visibly DURING the slide-off, not before it.
+                        sym_idx = min(int(elapsed / SKIP_GIF_FRAME_PERIOD_S), total_frames - 1)
+                        # Position: forward rests on right and slides off right;
+                        # back rests on left and slides off left.
+                        gif_w, gif_h = frames[0].size
+                        y_pos = (device.height - gif_h) // 2
+                        if forward:
+                            rest_x = device.width - gif_w
+                            exit_x = device.width
+                        else:
+                            rest_x = 0
+                            exit_x = -gif_w
+                        if elapsed < slide_start_time:
+                            x_pos = rest_x
+                        else:
+                            slide_p = (elapsed - slide_start_time) / SKIP_SLIDE_DURATION_S
+                            slide_p = slide_p * slide_p  # quadratic ease-in
+                            x_pos = int(rest_x + (exit_x - rest_x) * slide_p)
+                        # Symbol envelope: short fade-in at start.
+                        fade_in_s = TRANSITION_FADE_PORTION * slide_end_time
+                        symbol_env = min(1.0, elapsed / fade_in_s) if fade_in_s > 0 else 1.0
+                        behind = _transition_behind_img
+                        if behind is None:
+                            behind = _render_playback_image()
+                        _timed_paint("trans-skip", _paint_skip_transition,
+                                     frames[sym_idx], behind, x_pos, y_pos, symbol_env)
                         transition_idx = sym_idx
 
             elif screen == "menu":
@@ -1177,8 +1328,9 @@ def _set_screen_unsafe(name):
         # Skip the standard crossfade if EITHER side is a transition screen —
         # transitions render their own primary-screen crossfade with the symbol
         # GIF superimposed, so the post-transition handoff is already smooth.
-        skip = (name in ("transition_to_pause", "transition_to_play")
-                or old in ("transition_to_pause", "transition_to_play"))
+        _TRANSITION_SCREENS = ("transition_to_pause", "transition_to_play",
+                               "transition_skip_forward", "transition_skip_back")
+        skip = name in _TRANSITION_SCREENS or old in _TRANSITION_SCREENS
         if not skip:
             _start_fade()
         render_wake.set()
@@ -1246,6 +1398,7 @@ def on_message(data):
 def _handle_pushstate(data):
     global volume_initialized, last_volume, last_title, last_artist, last_seek, last_duration
     global last_status, last_event_wall, last_stop_wall, last_volume_event_wall, last_status_change_wall
+    global last_title_change_wall
     global last_random, last_repeat, last_repeat_single, last_service
 
     state = data.get("status", "")
@@ -1287,6 +1440,8 @@ def _handle_pushstate(data):
         prev_volume = last_volume
         seek_decreased = (prev_seek >= 0 and seek < prev_seek - 5000)
         title_changed = (title != prev_title)
+        if title_changed:
+            last_title_change_wall = now
 
         # --- Volume detection ---
         volume_event = False
@@ -1305,7 +1460,13 @@ def _handle_pushstate(data):
             elif (state == "play" and prev_status == "play"
                   and not title_changed and not seek_decreased
                   and last_volume_event_wall
-                  and (now - last_volume_event_wall) < VOLUME_BUTTON_RECENT_WINDOW):
+                  and (now - last_volume_event_wall) < VOLUME_BUTTON_RECENT_WINDOW
+                  # Track-change guard: Volumio sends a burst of pushStates at
+                  # the start of every new track. The FIRST has title_changed
+                  # so the heuristic skips it; the SECOND has the same title
+                  # as the first did and would satisfy every condition above.
+                  # Suppress the heuristic for 5s after any title change.
+                  and (now - last_title_change_wall) > 5.0):
                 last_volume_event_wall = now
                 volume_event = True
                 _trace("VOL_EVENT heuristic: vol=%s prev=%s within=%.2fs"
@@ -1351,11 +1512,25 @@ def _handle_pushstate(data):
         # state changes (e.g. track auto-advance during menu interaction).
         if current_screen == "menu":
             return
-        # During quiet hours, all state updates above still apply (so we wake to
-        # the right thing at 6am), but DO NOT touch the screen — leave it in
-        # screen_off. Without this gate, every incoming pushState would flap
-        # us through transition_to_play -> screen_off in a tight loop.
+        # Skip transitions own the screen until their own timer expires —
+        # don't let Volumio's pushStates (status=stop/play during track-change)
+        # interrupt the animation.
+        if current_screen in ("transition_skip_forward", "transition_skip_back"):
+            return
+        # During quiet hours we still want to flash the play/pause transition
+        # GIFs for visual remote feedback, but skip everything else (no flap
+        # on incidental pushStates). The transition completes back to
+        # screen_off naturally — see the transition_to_pause/play handlers,
+        # which check _in_quiet_hours() to pick the right exit target.
         if _in_quiet_hours():
+            if ignore_state_change:
+                return
+            if state == "pause" and prev_status == "play":
+                if current_screen in ("screen_off", "transition_to_play"):
+                    _set_screen_unsafe("transition_to_pause")
+            elif state == "play" and prev_status == "pause":
+                if current_screen in ("screen_off", "transition_to_pause"):
+                    _set_screen_unsafe("transition_to_play")
             return
         if volume_event:
             if current_screen != "volume":
@@ -1529,6 +1704,16 @@ def _menu_button(button):
     render_wake.set()
 
 
+_last_button_press_perf = {}
+# Buttons where IR auto-repeat is unwanted (skip, play). Volume buttons
+# deliberately omitted — auto-repeat is desired so holding ramps the volume.
+_BUTTON_DEBOUNCE_S = {
+    "KEY_RIGHT": 0.8,
+    "KEY_LEFT":  0.8,
+    "KEY_PLAY":  0.4,   # avoid double-toggling on a fat-fingered click
+}
+
+
 def _forward_to_volumio(button):
     """When the menu is closed, replicate the original lircrc behavior."""
     if button == "KEY_MENU":
@@ -1536,6 +1721,24 @@ def _forward_to_volumio(button):
         # (threading.Lock is non-reentrant; re-acquire would deadlock).
         _open_menu()
         return
+    # Debounce buttons that suffer from IR auto-repeat. One physical press of
+    # the Apple Remote can generate several IR frames; without this filter a
+    # single skip would fire volumio next/previous repeatedly and the skip
+    # transition would play 2+ times. Volume buttons are intentionally
+    # excluded (their repeat-while-held behavior is desirable).
+    debounce = _BUTTON_DEBOUNCE_S.get(button, 0.0)
+    if debounce > 0:
+        now = time.perf_counter()
+        last = _last_button_press_perf.get(button, 0.0)
+        if now - last < debounce:
+            return
+        _last_button_press_perf[button] = now
+    # Fire the skip transition immediately so the user gets visual feedback
+    # before Volumio finishes loading the next/previous track.
+    if button == "KEY_RIGHT":
+        _start_skip_transition("forward")
+    elif button == "KEY_LEFT":
+        _start_skip_transition("back")
     cmds = {
         "KEY_PLAY": ["toggle"],
         "KEY_RIGHT": ["next"],
