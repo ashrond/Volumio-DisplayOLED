@@ -1,0 +1,116 @@
+{
+  "page": {
+    "label": "TRANSLATE.SYNTHWAVE_DISPLAY.PAGE_LABEL"
+  },
+  "sections": [
+    {
+      "id": "section_theme",
+      "element": "section",
+      "label": "TRANSLATE.SYNTHWAVE_DISPLAY.SECTION_THEME",
+      "icon": "fa-paint-brush",
+      "description": "TRANSLATE.SYNTHWAVE_DISPLAY.SECTION_THEME_DESC",
+      "onSave": {
+        "type": "controller",
+        "endpoint": "user_interface/synthwave_display",
+        "method": "saveTheme"
+      },
+      "saveButton": {
+        "label": "TRANSLATE.SYNTHWAVE_DISPLAY.BUTTON_APPLY_THEME",
+        "data": ["active_theme"]
+      },
+      "content": [
+        {
+          "id": "active_theme",
+          "type": "select",
+          "element": "select",
+          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_ACTIVE_THEME",
+          "description": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_ACTIVE_THEME_DESC",
+          "value": { "value": "default", "label": "Default" },
+          "options": [
+            { "value": "default", "label": "Default" }
+          ]
+        }
+      ]
+    },
+
+    {
+      "id": "section_burnin",
+      "element": "section",
+      "label": "TRANSLATE.SYNTHWAVE_DISPLAY.SECTION_BURNIN",
+      "icon": "fa-shield",
+      "description": "TRANSLATE.SYNTHWAVE_DISPLAY.SECTION_BURNIN_DESC",
+      "onSave": {
+        "type": "controller",
+        "endpoint": "user_interface/synthwave_display",
+        "method": "saveBurnin"
+      },
+      "saveButton": {
+        "label": "TRANSLATE.SYNTHWAVE_DISPLAY.BUTTON_SAVE_BURNIN",
+        "data": [
+          "quiet_hours_start",
+          "quiet_hours_end",
+          "pixel_shift_enabled",
+          "scanline_alternation_enabled",
+          "track_fade_enabled"
+        ]
+      },
+      "content": [
+        {
+          "id": "quiet_hours_start",
+          "type": "number",
+          "element": "input",
+          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_QUIET_HOURS_START",
+          "attributes": [{ "min": 0 }, { "max": 23 }]
+        },
+        {
+          "id": "quiet_hours_end",
+          "type": "number",
+          "element": "input",
+          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_QUIET_HOURS_END",
+          "attributes": [{ "min": 0 }, { "max": 23 }]
+        },
+        {
+          "id": "pixel_shift_enabled",
+          "type": "boolean",
+          "element": "switch",
+          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_PIXEL_SHIFT_ENABLED"
+        },
+        {
+          "id": "scanline_alternation_enabled",
+          "type": "boolean",
+          "element": "switch",
+          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_SCANLINE_ENABLED"
+        },
+        {
+          "id": "track_fade_enabled",
+          "type": "boolean",
+          "element": "switch",
+          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_TRACK_FADE_ENABLED"
+        }
+      ]
+    },
+
+    {
+      "id": "section_actions",
+      "element": "section",
+      "label": "TRANSLATE.SYNTHWAVE_DISPLAY.SECTION_ACTIONS",
+      "icon": "fa-cogs",
+      "content": [
+        {
+          "id": "btn_restart",
+          "element": "button",
+          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.BUTTON_RESTART",
+          "onClick": {
+            "type": "emit",
+            "message": "callMethod",
+            "data": {
+              "endpoint": "user_interface/synthwave_display",
+              "method": "restartService",
+              "data": {}
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

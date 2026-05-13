@@ -1,0 +1,7 @@
+{
+  "_comment": "Plugin-internal state. The display program's runtime config lives in display/config/runtime.toml — that's the source of truth. Anything stored here is plugin-side bookkeeping only.",
+  "service_status": {
+    "type": "string",
+    "value": "stopped"
+  }
+}

@@ -144,7 +144,7 @@ End state in the Volumio plugin UI:
 - [x] Phase 5a: Screen abstraction — `screens/devices/{base,oled_ssd1322,tft_ili9341}.py`, capability flags, theme `supported_screens` tag, ILI9341 stub. Done 2026-05-13.
 - [x] Phase 5b: `tools/admin.py` — CLI bridge the WebUI plugin shells out to. Done 2026-05-13. Commands: list-themes, set-theme, validate-theme, upload-theme, delete-theme, list-devices, get-runtime, set-runtime, status, restart. Comment-preserving `runtime.toml` writes via tomlkit (added to requirements). Quiet mode via `VFD_NO_LOG=1` keeps admin CLI invocations out of `/tmp/vfd.log`.
 - [ ] Phase 5c: Refactor `main.py` to use device factory; gate burn-in mitigations on `device.is_oled`
-- [ ] Phase 6: Plugin scaffolding (`plugin/` subfolder) — index.js, package.json, UIConfig.json, install.sh, i18n
+- [x] Phase 6: Plugin scaffolding (`plugin/` subfolder) — index.js, package.json, UIConfig.json, install.sh + uninstall.sh, i18n. Done 2026-05-13. Scoped sudoers fragment, plugin-rooted systemd ExecStart, runtime.toml preserved across upgrades, full lifecycle + theme dropdown + burn-in subset + restart button. End-to-end test deferred to Phase 8.
 - [ ] Phase 7: Plugin — theme list/upload/delete handlers
 - [ ] Phase 8: Plugin — runtime settings form + display hardware form
 - [ ] Split: pick name, create new private repo, push fresh-history production tree
@@ -237,3 +237,5 @@ A handful of "we'd do this differently if starting from scratch" items, ranked b
 - **2026-05-13 — Install-time screen selector reaffirmed as WebUI-only.** Default install = `ssd1322`; user picks anything else via the plugin settings page.
 - **2026-05-13 — `tomlkit` added to requirements** for comment-preserving runtime.toml writes via `tools/admin.py`. Plain `toml` is still used for read-only parsing in `config/config.py` (hot path) where comment preservation doesn't matter.
 - **2026-05-13 — `VFD_NO_LOG=1` env-var convention.** Anything that imports `config.config` but isn't the main display program (admin CLI, future test harnesses, simulation device) sets this to suppress log handler installation. Keeps `/tmp/vfd.log` clean of per-invocation noise.
+- **2026-05-13 — Plugin path = service path.** Systemd unit (rendered by `plugin/install.sh`) ExecStart points at `<plugin_dir>/display/main.py`. All Python code, themes, and `runtime.toml` live inside the plugin folder Volumio extracts. Eliminates "where does the display code live" ambiguity. Plugin upgrades re-extract everything BUT `runtime.toml` is never overwritten by install.sh, so user settings carry through.
+- **2026-05-13 — Scoped passwordless sudo, not blanket.** `install.sh` writes `/etc/sudoers.d/synthwave-display` with NOPASSWD only for `systemctl <start|stop|restart|is-active> volumio-display.service`. Lets `admin.py restart` and the plugin's onStart/onStop work without prompting; no general escalation. Removed cleanly on uninstall.

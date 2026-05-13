@@ -1,0 +1,30 @@
+{
+  "SYNTHWAVE_DISPLAY": {
+    "PAGE_LABEL": "Synthwave Display",
+    "PAGE_DESC": "OLED/TFT display driver — themes, burn-in mitigation, quiet hours.",
+
+    "SECTION_THEME": "Theme",
+    "SECTION_THEME_DESC": "Pick a theme. Default ships with the plugin; custom themes can be uploaded as a zip.",
+    "FIELD_ACTIVE_THEME": "Active theme",
+    "FIELD_ACTIVE_THEME_DESC": "Switching themes restarts the display service.",
+    "BUTTON_APPLY_THEME": "Apply",
+
+    "SECTION_BURNIN": "Burn-in Mitigation",
+    "SECTION_BURNIN_DESC": "OLED panels can ghost from static UI. These defenses run at near-zero cost.",
+    "FIELD_QUIET_HOURS_START": "Quiet hours start (24-hr)",
+    "FIELD_QUIET_HOURS_END": "Quiet hours end (24-hr)",
+    "FIELD_PIXEL_SHIFT_ENABLED": "Pixel shift",
+    "FIELD_SCANLINE_ENABLED": "Scanline alternation",
+    "FIELD_TRACK_FADE_ENABLED": "Per-track brightness fade",
+    "BUTTON_SAVE_BURNIN": "Save",
+
+    "SECTION_ACTIONS": "Actions",
+    "BUTTON_RESTART": "Restart display service",
+    "BUTTON_OPEN_LOG": "View log",
+
+    "TOAST_SAVED": "Settings saved. Display service restarting.",
+    "TOAST_RESTARTED": "Display service restarted.",
+    "TOAST_THEME_APPLIED": "Theme applied.",
+    "TOAST_ERROR": "Error: "
+  }
+}

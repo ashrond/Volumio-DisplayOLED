@@ -1,0 +1,29 @@
+{
+  "name": "synthwave_display",
+  "version": "1.0.0",
+  "description": "OLED/TFT display driver for Volumio — playback screen, transitions, themes, burn-in mitigation.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"no tests yet\" && exit 0"
+  },
+  "author": "ashrond <devops@astralogicsystems.com>",
+  "license": "MIT",
+  "repository": "ashrond/Synthwave-Display",
+  "volumio_info": {
+    "prettyName": "Synthwave Display",
+    "plugin_type": "user_interface",
+    "icon": "fa-tv",
+    "boot_priority": 5,
+    "has_alarm": false,
+    "architectures": ["armhf", "amd64", "i386"]
+  },
+  "engines": {
+    "node": ">=8.0.0",
+    "volumio": ">=2.0"
+  },
+  "dependencies": {
+    "kew": "^0.7.0",
+    "v-conf": "^1.5.0",
+    "fs-extra": "^10.0.0"
+  }
+}
