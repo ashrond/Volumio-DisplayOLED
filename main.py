@@ -30,49 +30,58 @@ from config.config import (
     log,
     font_title, font_artist, font_volume,
     text_color,
-    GIF_PATH_LOADING,
+    # Asset paths (resolved by theme loader, with fallback to default theme)
+    GIF_PATH_IDLE, GIF_PATH_LOADING, GIF_PATH_PLAY_TO_PAUSE, GIF_PATH_PAUSE_TO_PLAY,
+    GIF_PATH_SKIP_FORWARD, GIF_PATH_SKIP_BACKWARD,
+    # Volumio / animation rates / internal thresholds (settings.toml tier)
+    VOLUMIO_WS_URL, GIF_FRAME_PERIOD, SCREENSAVER_FRAME_PERIOD,
+    CONTRAST_UPDATE_INTERVAL_S, TRACE_BUFFER_SIZE,
+    SLOW_PAINT_MS, SLOW_HANDLER_MS,
+    WATCHDOG_TIMEOUT_S, WATCHDOG_CHECK_INTERVAL_S,
+    # Display hardware (runtime.toml)
+    DEVICE_TYPE, DEVICE_WIDTH, DEVICE_HEIGHT, SPI_BUS, SPI_CS, SPI_SPEED_HZ,
+    # Timing / volume / menu (runtime.toml)
     PLAYBACK_REFRESH_SECONDS, VOLUME_HOLD_SECONDS,
     IDLE_AFTER_STOP_SECONDS, SCREEN_OFF_AFTER_IDLE_SECONDS, RENDER_TICK_SECONDS,
-    PAUSE_TO_PLAY_DEBOUNCE_SECONDS, TRANSITION_HOLD_AT_END_SECONDS, TRANSITION_FADE_PORTION_CFG,
+    PAUSE_TO_PLAY_DEBOUNCE_SECONDS,
     VOLUME_MAX, VOLUME_BUTTON_RECENT_WINDOW,
+    MENU_TIMEOUT_SECONDS, MENU_IR_UDP_PORT,
+    # Transition tunings (theme — fade, skip animation)
+    TRANSITION_HOLD_AT_END_SECONDS, TRANSITION_FADE_PORTION_CFG,
+    FADE_SECONDS,
+    SKIP_GIF_FRAME_PERIOD_S, SKIP_SLIDE_TRIGGER_FRAC, SKIP_SLIDE_DURATION_S,
+    SKIP_GIF_BRIGHTNESS_BOOST,
+    SKIP_ANIM_COOLDOWN_S, BUTTON_DEBOUNCE_S,
+    # Screensaver (theme)
     SCREENSAVER_MODE, SCREENSAVER_TARGET_POPULATION, SCREENSAVER_SPAWN_RATE,
     SCREENSAVER_MEDIAN_SPEED, SCREENSAVER_DRIFT_X, SCREENSAVER_DRIFT_Y,
-    FADE_SECONDS,
-    MENU_TIMEOUT_SECONDS, MENU_IR_UDP_PORT,
+    # Burn-in mitigation (runtime.toml)
     QUIET_HOURS_START, QUIET_HOURS_END,
     PIXEL_SHIFT_ENABLED, PIXEL_SHIFT_INTERVAL_S,
     STARTUP_CONTRAST,
     SCANLINE_ALT_ENABLED, SCANLINE_DIM_FACTOR, SCANLINE_ALT_INTERVAL_S,
     TRACK_FADE_ENABLED, TRACK_FADE_MAX, TRACK_FADE_MIN, TRACK_FADE_MIN_REMAINING_S,
+    # Loading screen layout (theme)
+    LOADING_TEXT_Y, LOADING_GIF_Y, LOADING_GIF_HEIGHT,
+    # Theme metadata (for diagnostic logs)
+    ACTIVE_THEME,
 )
 from screens.startup import display_startup
 from screens.playback import display_playback_screen, needs_marquee
 from screens import screensaver, screensaver_replay
 from screens.menu import paint_menu
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-GIF_PATH_IDLE = os.path.join(_HERE, "assets/idle.gif")
-GIF_PATH_PLAY_TO_PAUSE = os.path.join(_HERE, "assets/play-to-pause.gif")
-GIF_PATH_PAUSE_TO_PLAY = os.path.join(_HERE, "assets/pause-to-play.gif")
-GIF_PATH_SKIP_FORWARD = os.path.join(_HERE, "assets/skip-forward.gif")
-GIF_PATH_SKIP_BACKWARD = os.path.join(_HERE, "assets/skip-backward.gif")
-# Note: pause.gif is intentionally retired; idle.gif is now the universal
-# screensaver content for both pause and stop states.
-VOLUMIO_WS_URL = "http://localhost:3000"
-
-# Animated screens advance one GIF frame per this interval (10fps). Render tick is faster
-# (20Hz) for snappy state transitions, but full SPI repaints at 20Hz are wasteful.
-GIF_FRAME_PERIOD = 0.1
-# Screensaver runs faster — the source idle.gif was authored at 25fps (40ms).
-SCREENSAVER_FRAME_PERIOD = 0.04
-
 # --- SPI device ---
 # SSD1322 supports 4-bit (16-level) grayscale. luma.core only accepts modes
 # "1", "RGB", "RGBA" — there's no "L" option (verified 2026-05-10). So we keep
 # RGB and override display() with a vectorized RGB→4bpp conversion below;
 # the stock implementation has a pure-Python per-pixel loop that dominates CPU.
-serial = spi(device=0, port=0, bus_speed_hz=8000000)
-device = ssd1322(serial)
+serial = spi(device=SPI_CS, port=SPI_BUS, bus_speed_hz=SPI_SPEED_HZ)
+if DEVICE_TYPE == "ssd1322":
+    device = ssd1322(serial)
+else:
+    raise RuntimeError("Unsupported display.type=%r — only 'ssd1322' is wired up. "
+                       "Edit runtime.toml [display] type or extend main.py." % DEVICE_TYPE)
 # Bump initial contrast above luma's 127 default so the startup gif reads
 # clearly through the scanline alternation. _update_track_brightness will
 # take over as soon as the first play pushState arrives.
@@ -541,7 +550,7 @@ shutdown_event = threading.Event()  # set on SIGTERM/SIGINT
 _was_in_quiet_hours = False        # so we can detect the boundary on exit
 _last_contrast_set = -1            # debounce SPI writes for contrast
 _last_contrast_update_perf = 0.0
-_CONTRAST_UPDATE_INTERVAL_S = 1.0  # update brightness at most once per second
+_CONTRAST_UPDATE_INTERVAL_S = CONTRAST_UPDATE_INTERVAL_S  # alias for in-module reference
 
 # The "fade origin" is the seek (in ms) at which brightness is at TRACK_FADE_MAX.
 # Brightness ramps linearly down to TRACK_FADE_MIN at end-of-track. New tracks
@@ -629,8 +638,7 @@ def _update_track_brightness():
 # In-memory trace ring buffer for diagnosing Heisenbugs that don't reproduce
 # under DEBUG file logging (the I/O latency masks timing-sensitive races).
 # `_trace()` is microsecond-cheap; SIGUSR1 dumps the buffer to /tmp/vfd-trace.log.
-_TRACE_MAX = 4000
-_trace_buffer = collections.deque(maxlen=_TRACE_MAX)
+_trace_buffer = collections.deque(maxlen=TRACE_BUFFER_SIZE)
 _trace_lock = threading.Lock()
 
 
@@ -638,16 +646,14 @@ def _trace(msg):
     ts = time.perf_counter()
     with _trace_lock:
         _trace_buffer.append((ts, msg))
-SLOW_PAINT_MS = 30
-SLOW_HANDLER_MS = 20
+
+
 last_screen_change_perf = 0.0
 
 # Watchdog: render thread updates this on every successful tick. The watchdog
 # thread checks that the gap stays under WATCHDOG_TIMEOUT_S; if it doesn't,
 # the process exits non-zero so systemd (or whatever supervisor) restarts us.
 last_render_tick_wall = time.time()
-WATCHDOG_TIMEOUT_S = 60
-WATCHDOG_CHECK_INTERVAL_S = 15
 
 # --- GIF frame cache ---
 _frame_cache = {}
@@ -708,11 +714,10 @@ def _prewarm_gifs():
     _build_loading_resized_frames()
 
 
-# Loading screen layout: text at top with margin, GIF resized shorter and
-# positioned in the lower half so there's a clear gap between them.
-_LOADING_TEXT_Y = 4
-_LOADING_GIF_HEIGHT = 36
-_LOADING_GIF_Y = 24
+# Loading screen layout (theme-defined; aliased for short names in the painter)
+_LOADING_TEXT_Y = LOADING_TEXT_Y
+_LOADING_GIF_HEIGHT = LOADING_GIF_HEIGHT
+_LOADING_GIF_Y = LOADING_GIF_Y
 _loading_resized_frames = []
 
 
@@ -772,25 +777,42 @@ def _paint_loading(idx, error=""):
     device.display(img)
 
 
+_gif_idle_warned = False
+
+
+def _paint_procedural_idle():
+    """Procedural particle screensaver — used when mode='procedural', or
+    as a graceful fallback if mode='gif' was requested but idle.gif is missing."""
+    screensaver.paint(
+        device,
+        target_population=SCREENSAVER_TARGET_POPULATION,
+        spawn_rate=SCREENSAVER_SPAWN_RATE,
+        drift_x=SCREENSAVER_DRIFT_X,
+        drift_y=SCREENSAVER_DRIFT_Y,
+        median_speed=SCREENSAVER_MEDIAN_SPEED,
+    )
+
+
 def _paint_idle(idx):
     """Universal screensaver — used for both pause and idle states.
-    Dispatches based on [screensaver] mode."""
+    Dispatches based on the active theme's [screensaver] mode."""
+    global _gif_idle_warned
     if SCREENSAVER_MODE == "replay":
         screensaver_replay.paint(device)
         return
     if SCREENSAVER_MODE == "procedural":
-        screensaver.paint(
-            device,
-            target_population=SCREENSAVER_TARGET_POPULATION,
-            spawn_rate=SCREENSAVER_SPAWN_RATE,
-            drift_x=SCREENSAVER_DRIFT_X,
-            drift_y=SCREENSAVER_DRIFT_Y,
-            median_speed=SCREENSAVER_MEDIAN_SPEED,
-        )
+        _paint_procedural_idle()
         return
-    # Fallback: looping GIF
+    # gif mode: loop the theme's idle.gif. If the asset is missing (the
+    # default theme intentionally omits one — procedural is the default),
+    # warn once and fall through to procedural so the screen isn't blank.
     frames = _load_frames(GIF_PATH_IDLE, resize_to_screen=True)
     if not frames:
+        if not _gif_idle_warned:
+            log.warning("screensaver mode='gif' but no idle.gif in theme %r; "
+                        "falling back to procedural", ACTIVE_THEME)
+            _gif_idle_warned = True
+        _paint_procedural_idle()
         return
     f = frames[idx % len(frames)]
     img = Image.new(device.mode, (device.width, device.height), "black")
@@ -847,25 +869,9 @@ def _paint_skip_transition(symbol_frame, behind, x_pos, y_pos, symbol_env):
     device.display(composite)
 
 
-# --- Skip transition tuning ---
-# Frame-based timing. The skip GIFs are authored at ~10 fps and have an
-# internal two-phase animation: phase 1 = first arrow flies, phase 2 = a
-# second arrow appears behind. We want the slide-off to START at the
-# transition between phases so phase 2 happens *during* the slide, which
-# reads as "the arrow being pushed off by the next one".
-SKIP_GIF_FRAME_PERIOD_S = 0.173     # ~5.8 fps (60% slower than the 10fps native)
-SKIP_SLIDE_TRIGGER_FRAC = 0.25      # slide begins at ~0.25s into GIF playback
-SKIP_SLIDE_DURATION_S = 0.5         # how long the slide-off takes once triggered
-# Source GIFs are darker than the play/pause GIFs and disappear under the
-# playback screen's bright text when blended with ImageChops.lighter.
-# Multiplicative pixel-value boost; clipped to 255.
-SKIP_GIF_BRIGHTNESS_BOOST = 2.0
-# A "skip burst" is a string of presses each within this many seconds of the
-# last. Only the first press of a burst plays the animation; subsequent
-# presses still fire their volumio next/previous commands. Each press
-# extends the cooldown — keep tapping and you'll see one animation no matter
-# how many tracks you skip past.
-SKIP_ANIM_COOLDOWN_S = 3.0
+# Skip transition tuning lives in the theme (timing) and runtime (cooldown);
+# constants are imported above. _last_skip_anim_perf is the only mutable bit
+# we keep locally.
 _last_skip_anim_perf = 0.0
 
 
@@ -1705,13 +1711,9 @@ def _menu_button(button):
 
 
 _last_button_press_perf = {}
-# Buttons where IR auto-repeat is unwanted (skip, play). Volume buttons
-# deliberately omitted — auto-repeat is desired so holding ramps the volume.
-_BUTTON_DEBOUNCE_S = {
-    "KEY_RIGHT": 0.8,
-    "KEY_LEFT":  0.8,
-    "KEY_PLAY":  0.4,   # avoid double-toggling on a fat-fingered click
-}
+# Per-button debounce table comes from runtime.toml [ir.debounce].
+# Volume buttons are deliberately not listed there so auto-repeat works as
+# intended (holding the key ramps the volume).
 
 
 def _forward_to_volumio(button):
@@ -1726,7 +1728,7 @@ def _forward_to_volumio(button):
     # single skip would fire volumio next/previous repeatedly and the skip
     # transition would play 2+ times. Volume buttons are intentionally
     # excluded (their repeat-while-held behavior is desirable).
-    debounce = _BUTTON_DEBOUNCE_S.get(button, 0.0)
+    debounce = BUTTON_DEBOUNCE_S.get(button, 0.0)
     if debounce > 0:
         now = time.perf_counter()
         last = _last_button_press_perf.get(button, 0.0)

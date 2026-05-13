@@ -1,0 +1,95 @@
+# Runtime configuration. This is the file the WebUI writes when the user
+# changes any visible setting. Anything that should be tunable from the
+# browser belongs here.
+
+[display]
+# Currently only "ssd1322" is wired up. Schema supports future screen
+# types — when adding one, also wire up the driver in main.py.
+type           = "ssd1322"
+width          = 256
+height         = 64
+spi_bus        = 0       # luma calls this `port`
+spi_cs         = 0       # luma calls this `device` (chip-select line)
+spi_speed_hz   = 8000000
+
+[logging]
+enabled        = true
+level          = "INFO"
+file           = "/tmp/vfd.log"
+max_bytes      = 2097152
+backup_count   = 3
+
+[volume]
+# Volumio's user-configured max. Display shows "MAX"/"MIN" markers at the
+# bounds. Set to whatever you have in Volumio's volume options.
+max                       = 20
+# Heuristic: if a pushState arrives with the same volume but within this
+# many seconds of the last real volume change, treat as a button press at
+# limit (Volumio doesn't send pushStates when vol can't actually change).
+button_recent_window      = 30.0
+
+[menu]
+# Auto-close the menu after this many seconds of no remote input.
+timeout_seconds           = 15.0
+# UDP port the display listens on for IR events from tools/ir_dispatch.sh.
+ir_udp_port               = 9876
+
+[timing]
+# How often the playback screen repaints when no marquee/stream effect
+# is active. Clock and progress bar update at this rate.
+playback_refresh_seconds        = 1.0
+# How long the volume screen stays up after the last volume change.
+volume_hold_seconds             = 1.5
+# Loading screen auto-transitions to idle when status=stop has persisted
+# this long.
+idle_after_stop_seconds         = 300.0
+# Idle screen auto-transitions to screen_off (panel sleep) after this long.
+screen_off_after_idle_seconds   = 3600.0
+# Render thread cadence. 0.05s = 20Hz.
+render_tick_seconds             = 0.05
+# Some remotes auto-repeat pause as play within this window — ignore it.
+pause_to_play_debounce_seconds  = 1.5
+
+[burnin]
+# Force screen_off during these hours (24-hr local). Wraps midnight.
+# Set both equal to disable.
+quiet_hours_start                  = 2
+quiet_hours_end                    = 6
+# Cycle the rendered UI by 1px every N seconds to spread wear.
+pixel_shift_enabled                = true
+pixel_shift_interval_s             = 180.0
+# Alternate every other screen row at reduced brightness; swap which rows
+# are dim every N seconds. Halves average per-pixel luminance.
+scanline_alternation_enabled       = true
+scanline_dim_factor                = 0.7
+scanline_alternation_interval_s    = 45.0
+# Contrast applied at process start (luma's default is 127, too dim under
+# the scanline overlay). Track fade takes over once playback begins.
+startup_contrast                   = 200
+# Per-track brightness fade: contrast ramps from MAX at the fade origin
+# to MIN at end-of-track. Origin resets to 0 on new track, to current
+# seek on pause/menu. min_remaining_s suppresses pointless fades that
+# would finish within a few seconds anyway.
+track_fade_enabled                 = true
+track_fade_max                     = 255
+track_fade_min                     = 0
+track_fade_min_remaining_s         = 60.0
+
+[ir]
+# A "skip burst" is a string of presses each within this many seconds of
+# the last. Only the first plays the slide animation; subsequent presses
+# still fire their next/previous commands.
+skip_anim_cooldown_s   = 3.0
+
+[ir.debounce]
+# IR-auto-repeat suppression, per button. One physical Apple-Remote press
+# can fire several IR frames; without this filter a single skip would
+# pile up multiple `volumio next` commands. Volume keys deliberately
+# omitted — auto-repeat is desirable so holding ramps the volume.
+KEY_RIGHT = 0.8
+KEY_LEFT  = 0.8
+KEY_PLAY  = 0.4
+
+[theme]
+# Which themes/<name>/ folder to load. Falls back to default if missing.
+active = "default"

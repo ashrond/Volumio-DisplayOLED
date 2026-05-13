@@ -2,8 +2,19 @@ import math
 import time
 from PIL import Image, ImageDraw
 from config.config import (
-    font_time, font_title, font_artist, text_color, background_color, progress_bar_width
+    font_time, font_title, font_artist, text_color, background_color, progress_bar_width,
+    PLAYBACK_TIME_Y, PLAYBACK_TITLE_Y, PLAYBACK_PROGRESS_BAR_Y, PLAYBACK_PROGRESS_BAR_HEIGHT,
+    PLAYBACK_ARTIST_Y, PLAYBACK_MARQUEE_SPEED_PX_PER_S, PLAYBACK_MARQUEE_GAP_PX,
 )
+
+# Local aliases for shorter names in the code below.
+SCROLL_SPEED_PX_PER_S = PLAYBACK_MARQUEE_SPEED_PX_PER_S
+MARQUEE_GAP_PX        = PLAYBACK_MARQUEE_GAP_PX
+TIME_Y                = PLAYBACK_TIME_Y
+TITLE_Y               = PLAYBACK_TITLE_Y
+PROGRESS_BAR_Y        = PLAYBACK_PROGRESS_BAR_Y
+PROGRESS_BAR_H        = PLAYBACK_PROGRESS_BAR_HEIGHT
+ARTIST_Y              = PLAYBACK_ARTIST_Y
 
 # Marquee state — tracks scroll offset for long titles between paint calls.
 _marquee_offset_px = 0.0
@@ -48,19 +59,6 @@ def _get_or_build_sprite(state, text, font, mode):
 # to a stable buffer that isn't being mutated.
 _canvases = None
 _canvas_idx = 0
-
-# Marquee tuning (could be moved to theme.toml later if desired)
-SCROLL_SPEED_PX_PER_S = 28      # how fast the title scrolls
-MARQUEE_GAP_PX = 40             # blank space between repetitions of the title
-
-# Vertical layout. Time is at the top; title sits in the middle with breathing
-# room above (away from clock) and small gap below to the progress bar.
-TIME_Y = 0           # font_time = 24px tall, ends at y=24
-TITLE_Y = 28         # was 22 (overlapped clock); now well clear of it
-PROGRESS_BAR_Y = 44
-PROGRESS_BAR_H = 3
-ARTIST_Y = 50
-
 
 def needs_marquee(title):
     """True if the title is wider than the screen and should scroll."""

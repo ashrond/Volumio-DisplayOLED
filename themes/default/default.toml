@@ -1,0 +1,70 @@
+# Default theme. This file is the privileged base — every other theme falls
+# through to these values for any key it omits. Do not delete; the loader
+# refuses to start without it.
+
+[meta]
+name           = "Default"
+version        = "1.0"
+author         = "ashrond"
+description    = "Default theme shipped with the display."
+schema_version = 1
+
+[fonts]
+time           = 24
+title          = 12
+artist         = 10
+volume         = 20
+
+[colors]
+# SSD1322 is 4-bit grayscale. PIL accepts "white" / "black" / etc. for
+# convenience; on a monochrome panel any non-zero pixel is "on" so these
+# read as binary. Full RGB plumbing for future color screens is in place
+# but UNTESTED.
+text_color         = "white"
+background_color   = "black"
+
+[layout.playback]
+time_y                    = 0
+title_y                   = 28
+progress_bar_y            = 44
+progress_bar_height       = 3
+progress_bar_width        = 200
+artist_y                  = 50
+marquee_speed_px_per_s    = 28
+marquee_gap_px            = 40
+
+[layout.loading]
+text_y         = 4
+gif_y          = 24
+gif_height     = 36
+
+[transitions]
+# Screen-to-screen crossfade duration. 0 disables.
+fade_seconds                       = 0.80
+# Play/pause transition: how long to hold the symbol GIF's last frame
+# before its fade-out, and what fraction of the total is ramp-in/out.
+transition_hold_at_end_seconds     = 0.5
+transition_fade_portion            = 0.22
+# Skip-forward / skip-back transition tuning. Frame period is the GIF's
+# playback rate (0.10 = 10 fps native). Slide trigger is the fraction of
+# GIF frames played before the icon slides off; duration is how long the
+# slide takes. Brightness boost multiplies pixel values before the lighter
+# blend (the skip GIFs are darker than the play/pause ones).
+skip_gif_frame_period_s            = 0.173
+skip_slide_trigger_frac            = 0.25
+skip_slide_duration_s              = 0.5
+skip_gif_brightness_boost          = 2.0
+
+[screensaver]
+# Idle / pause animation. "procedural" runs the particle simulator;
+# "replay" plays back recorded idle-gif statistics; "gif" loops idle.gif.
+mode                  = "procedural"
+target_population     = 70
+spawn_rate            = 23.0
+median_speed          = 5.5
+drift_x               = -0.4
+drift_y               = 0.0
+
+# Optional [assets] block: override canonical filenames.
+# [assets]
+# startup = "alt-startup.gif"

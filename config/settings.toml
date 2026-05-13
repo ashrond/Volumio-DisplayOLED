@@ -1,0 +1,42 @@
+# Program defaults and paths. The WebUI never writes this file.
+# Constants here would otherwise be hardcoded in Python source — keeping
+# them in a single TOML means tuning the program is a one-file edit.
+
+[paths]
+# System font used for ALL text on the display. Theme TOMLs choose point
+# sizes from here.
+font_path     = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf"
+# Directory containing all theme folders. Resolved relative to project root.
+themes_dir    = "themes"
+
+[defaults]
+# Privileged theme. Cannot be deleted; provides fallback values when an
+# active theme omits a key, and fallback assets when it omits a GIF.
+default_theme = "default"
+
+[volumio]
+# Where Volumio's socketio server lives. Localhost in the standard install.
+ws_url        = "http://localhost:3000"
+
+[animation]
+# Default GIF playback period for animated screens (loading / pause /
+# pause-to-play / play-to-pause). Theme TOMLs override per-transition.
+gif_frame_period_s          = 0.1
+# Procedural screensaver paint rate.
+screensaver_frame_period_s  = 0.04
+# Minimum interval between contrast register writes (the per-track
+# brightness fade is throttled to this).
+contrast_update_interval_s  = 1.0
+
+[internal]
+# In-memory trace ring buffer max events. Dumped to /tmp/vfd-trace.log
+# on SIGUSR1 for Heisenbug diagnosis.
+trace_buffer_size           = 4000
+# Warn-thresholds for paint and pushState handler latency. Misses logged
+# at WARNING level. Tune up if false-positives spam the log.
+slow_paint_ms               = 30
+slow_handler_ms             = 20
+# In-process watchdog. Renders that take longer than `timeout_s` between
+# heartbeats trigger an os._exit(4) so systemd restarts us.
+watchdog_timeout_s          = 60
+watchdog_check_interval_s   = 15
