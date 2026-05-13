@@ -125,6 +125,32 @@ SynthwaveDisplay.prototype.getUIConfig = function () {
             || { value: active, label: active };
         }
 
+        // Inject one "Delete: <name>" button per non-default, non-active theme
+        // into section_themes_manage. Static fields (upload_path, download)
+        // are already in UIConfig.json; we just append the dynamic ones.
+        const manageSection = uiconf.sections.find((s) => s.id === 'section_themes_manage');
+        if (manageSection) {
+          const deletable = (themesResp.themes || []).filter(
+            (t) => !t.is_default && !t.is_active
+          );
+          deletable.forEach((t) => {
+            manageSection.content.push({
+              id: 'btn_delete_' + t.name,
+              element: 'button',
+              label: 'Delete: ' + (t.display_name || t.name),
+              onClick: {
+                type: 'emit',
+                message: 'callMethod',
+                data: {
+                  endpoint: 'user_interface/synthwave_display',
+                  method: 'deleteTheme',
+                  data: { theme_name: t.name },
+                },
+              },
+            });
+          });
+        }
+
         // Populate burn-in field defaults from current runtime.toml.
         const runtime = runtimeResp.runtime || {};
         const burnin = runtime.burnin || {};
@@ -192,6 +218,52 @@ SynthwaveDisplay.prototype.restartService = function () {
   const self = this;
   return self._admin(['restart'])
     .then(() => self._toastOk('TOAST_RESTARTED'))
+    .fail((err) => self._toastErr('TOAST_ERROR', err));
+};
+
+/** Install a theme from a zip already on the Pi at the user-provided path. */
+SynthwaveDisplay.prototype.uploadThemeFromPath = function (data) {
+  const self = this;
+  const zipPath = (data.upload_path || '').trim();
+  if (!zipPath) {
+    return self._toastErr('TOAST_ERROR', 'Provide a path to the theme zip.');
+  }
+  return self._admin(['upload-theme', zipPath])
+    .then((resp) => {
+      self.logger.info('[synthwave_display] installed theme ' + (resp.theme || '?'));
+      return self._toastOk('TOAST_UPLOAD_OK');
+    })
+    .fail((err) => self._toastErr('TOAST_ERROR', err));
+};
+
+/** Remove a theme folder. The button calling this carries data.theme_name. */
+SynthwaveDisplay.prototype.deleteTheme = function (data) {
+  const self = this;
+  const name = (data && data.theme_name) || '';
+  if (!name) {
+    return self._toastErr('TOAST_ERROR', 'Missing theme name.');
+  }
+  return self._admin(['delete-theme', name])
+    .then(() => self._toastOk('TOAST_DELETE_OK'))
+    .fail((err) => self._toastErr('TOAST_ERROR', err));
+};
+
+/** Create a zip of themes/default/ at /tmp and surface the path to the user.
+ * Until we have a real browser file picker for upload, this is a manual
+ * download — the user grabs the zip via SCP / file manager. */
+SynthwaveDisplay.prototype.downloadDefaultTheme = function () {
+  const self = this;
+  return self._admin(['download-theme', 'default'])
+    .then((resp) => {
+      const where = resp.path || '/tmp/default-theme.zip';
+      // Show the path in the toast so the user knows where to fetch it.
+      self.commandRouter.pushToastMessage(
+        'success', 'Synthwave Display',
+        (self.commandRouter.getI18nString('SYNTHWAVE_DISPLAY.TOAST_DOWNLOAD_OK')
+          || 'Default theme zipped to ') + where
+      );
+      return libQ.resolve();
+    })
     .fail((err) => self._toastErr('TOAST_ERROR', err));
 };
 

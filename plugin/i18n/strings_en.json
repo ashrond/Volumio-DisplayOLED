@@ -9,6 +9,18 @@
     "FIELD_ACTIVE_THEME_DESC": "Switching themes restarts the display service.",
     "BUTTON_APPLY_THEME": "Apply",
 
+    "SECTION_THEMES_MANAGE": "Manage Themes",
+    "SECTION_THEMES_MANAGE_DESC": "Upload, download, and delete themes. Upload accepts a path to a .zip file on the device; deletes apply immediately.",
+    "FIELD_UPLOAD_PATH": "Path to theme .zip on the device",
+    "FIELD_UPLOAD_PATH_DESC": "Place your zip somewhere on the Pi (via SCP or Volumio's file manager), then paste the absolute path here.",
+    "BUTTON_UPLOAD": "Install theme",
+    "BUTTON_DELETE_PREFIX": "Delete: ",
+    "BUTTON_DOWNLOAD_DEFAULT": "Download default theme (creates zip)",
+    "TOAST_UPLOAD_OK": "Theme installed.",
+    "TOAST_DELETE_OK": "Theme deleted.",
+    "TOAST_DOWNLOAD_OK": "Default theme zipped to ",
+    "INFO_NO_DELETABLE": "No themes available to delete (default and active themes are protected).",
+
     "SECTION_BURNIN": "Burn-in Mitigation",
     "SECTION_BURNIN_DESC": "OLED panels can ghost from static UI. These defenses run at near-zero cost.",
     "FIELD_QUIET_HOURS_START": "Quiet hours start (24-hr)",

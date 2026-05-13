@@ -145,7 +145,7 @@ End state in the Volumio plugin UI:
 - [x] Phase 5b: `tools/admin.py` — CLI bridge the WebUI plugin shells out to. Done 2026-05-13. Commands: list-themes, set-theme, validate-theme, upload-theme, delete-theme, list-devices, get-runtime, set-runtime, status, restart. Comment-preserving `runtime.toml` writes via tomlkit (added to requirements). Quiet mode via `VFD_NO_LOG=1` keeps admin CLI invocations out of `/tmp/vfd.log`.
 - [ ] Phase 5c: Refactor `main.py` to use device factory; gate burn-in mitigations on `device.is_oled`
 - [x] Phase 6: Plugin scaffolding (`plugin/` subfolder) — index.js, package.json, UIConfig.json, install.sh + uninstall.sh, i18n. Done 2026-05-13. Scoped sudoers fragment, plugin-rooted systemd ExecStart, runtime.toml preserved across upgrades, full lifecycle + theme dropdown + burn-in subset + restart button. End-to-end test deferred to Phase 8.
-- [ ] Phase 7: Plugin — theme list/upload/delete handlers
+- [x] Phase 7: Plugin — theme list/upload/delete/download handlers. Done 2026-05-13. UIConfig section_themes_manage with path-input upload, dynamic per-theme delete buttons (injected by getUIConfig), and download-default button. admin.py gained `download-theme` command. End-to-end zip round-trip verified. **Limitation:** upload is path-based (user puts zip on Pi via SCP/file-manager, then pastes path). True browser file-picker is a future enhancement once we know the right Volumio file-upload pattern.
 - [ ] Phase 8: Plugin — runtime settings form + display hardware form
 - [ ] Split: pick name, create new private repo, push fresh-history production tree
 

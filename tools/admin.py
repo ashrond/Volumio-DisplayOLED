@@ -12,6 +12,7 @@ Commands:
   validate-theme <zip>              Inspect a zip without installing
   upload-theme <zip>                Extract + validate + install a theme zip
   delete-theme <name>               Remove a theme folder (refuses default and active)
+  download-theme <name> [<out>]     Zip a theme into <out> (default: /tmp/<name>-theme.zip)
   list-devices                      Supported display drivers + categories
   get-runtime                       Dump runtime.toml as JSON
   set-runtime <sec> <key> <val>     Set a runtime.toml value (auto-typed)
@@ -340,6 +341,37 @@ def cmd_delete_theme(args):
     emit_ok({"theme": name})
 
 
+def cmd_download_theme(args):
+    """Zip an installed theme into <out> (default: /tmp/<name>-theme.zip).
+    Output path is returned in the JSON envelope so the plugin can surface
+    it to the user. Used for the "Download Default Theme" template button."""
+    if len(args) < 1:
+        emit_err("usage: download-theme <name> [<out>]", EXIT_INVALID_ARGS)
+    name = args[0]
+    if not _theme_name_valid(name):
+        emit_err("invalid theme name %r" % name, EXIT_INVALID_ARGS)
+    src = THEMES_DIR / name
+    if not src.is_dir():
+        emit_err("theme %r not found" % name, EXIT_NOT_FOUND)
+    out_path = Path(args[1]) if len(args) >= 2 else Path("/tmp/%s-theme.zip" % name)
+    try:
+        # Write to a temp file then rename so a partial zip never appears
+        # at the advertised path.
+        tmp = out_path.with_suffix(".zip.tmp")
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zf:
+            for root, _, files in os.walk(src):
+                for f in files:
+                    full = Path(root) / f
+                    # Zip-relative path: <name>/...  so the zip contains exactly
+                    # one top-level folder (validators expect this).
+                    rel = full.relative_to(src.parent)
+                    zf.write(full, str(rel))
+        tmp.replace(out_path)
+    except Exception as e:
+        emit_err("zip failed: %s" % e, EXIT_INTERNAL)
+    emit_ok({"theme": name, "path": str(out_path), "size": out_path.stat().st_size})
+
+
 def cmd_get_runtime(args):
     """Read-only dump of runtime.toml as JSON. Uses plain toml (no comment
     preservation needed for read-only output)."""
@@ -429,6 +461,7 @@ COMMANDS = {
     "validate-theme":  cmd_validate_theme,
     "upload-theme":    cmd_upload_theme,
     "delete-theme":    cmd_delete_theme,
+    "download-theme":  cmd_download_theme,
     "get-runtime":     cmd_get_runtime,
     "set-runtime":     cmd_set_runtime,
     "status":          cmd_status,

@@ -34,6 +34,47 @@
     },
 
     {
+      "id": "section_themes_manage",
+      "element": "section",
+      "label": "TRANSLATE.SYNTHWAVE_DISPLAY.SECTION_THEMES_MANAGE",
+      "icon": "fa-archive",
+      "description": "TRANSLATE.SYNTHWAVE_DISPLAY.SECTION_THEMES_MANAGE_DESC",
+      "onSave": {
+        "type": "controller",
+        "endpoint": "user_interface/synthwave_display",
+        "method": "uploadThemeFromPath"
+      },
+      "saveButton": {
+        "label": "TRANSLATE.SYNTHWAVE_DISPLAY.BUTTON_UPLOAD",
+        "data": ["upload_path"]
+      },
+      "content": [
+        {
+          "id": "upload_path",
+          "type": "string",
+          "element": "input",
+          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_UPLOAD_PATH",
+          "description": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_UPLOAD_PATH_DESC",
+          "value": ""
+        },
+        {
+          "id": "btn_download_default",
+          "element": "button",
+          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.BUTTON_DOWNLOAD_DEFAULT",
+          "onClick": {
+            "type": "emit",
+            "message": "callMethod",
+            "data": {
+              "endpoint": "user_interface/synthwave_display",
+              "method": "downloadDefaultTheme",
+              "data": {}
+            }
+          }
+        }
+      ]
+    },
+
+    {
       "id": "section_burnin",
       "element": "section",
       "label": "TRANSLATE.SYNTHWAVE_DISPLAY.SECTION_BURNIN",
