@@ -1,6 +1,11 @@
-# Master Plan — Volumio Display Theme & Config System
+# Master Plan — Synthwave-Display
 
 > Living document. Update as decisions firm up.
+>
+> **Project name (locked 2026-05-13):** `Synthwave-Display`
+> **Target GitHub repo (TBC):** `ashrond/Synthwave-Display` (private; user creates when ready to split)
+> **Current repo:** `ashrond/Volumio-DisplayOLED` — retains all history, `dev/`, `masterplan.md`, planning artifacts. Becomes archive after split.
+> **Split strategy:** option B — finish phases 5–8 here, then push a single clean first commit to the new repo. The new repo will be Volumio-plugin compliant from day one.
 
 ## North Star
 
@@ -132,13 +137,95 @@ End state in the Volumio plugin UI:
 ## Phase Status
 
 - [x] Masterplan + architecture
-- [ ] Phase 1: Theme directory migration (move assets, create default.toml)
-- [ ] Phase 2: Settings/runtime config split (replace theme.toml)
-- [ ] Phase 3: Theme loader with default fallback
-- [ ] Phase 4: Asset path refactor (remove hardcoded `assets/`)
-- [ ] Phase 5: Theme switch CLI/endpoint
-- [ ] Phase 6: WebUI upload/extract handler
-- [ ] Phase 7: WebUI dropdown + delete
-- [ ] Phase 8: WebUI runtime settings form + display hardware form
+- [x] Phase 1: Theme directory migration (move assets, create default.toml)
+- [x] Phase 2: Settings/runtime config split (replace theme.toml)
+- [x] Phase 3: Theme loader with default fallback
+- [x] Phase 4: Asset path refactor (remove hardcoded `assets/`)
+- [ ] Phase 5a: Screen abstraction — `screens/devices/{base,oled_ssd1322,tft_ili9341}.py`, capability flags, theme `target_screen` tag, ILI9341 stub
+- [ ] Phase 5b: `tools/admin.py` — CLI bridge the WebUI plugin shells out to
+- [ ] Phase 5c: Refactor `main.py` to use device factory; gate burn-in mitigations on `device.is_oled`
+- [ ] Phase 6: Plugin scaffolding (`plugin/` subfolder) — index.js, package.json, UIConfig.json, install.sh, i18n
+- [ ] Phase 7: Plugin — theme list/upload/delete handlers
+- [ ] Phase 8: Plugin — runtime settings form + display hardware form
+- [ ] Split: pick name, create new private repo, push fresh-history production tree
 
-Phases 1–4 will land in a single commit. Each subsequent phase should leave the display in a fully-working state.
+Phases 5–8 land in **this repo** before the split. When complete, the new plugin repo gets a single clean push of the production tree (display code + plugin scaffolding); `dev/`, `masterplan.md`, and history stay here.
+
+## Plugin Architecture (target after split)
+
+Volumio plugins are Node.js. The plugin wraps our Python display:
+
+```
+volumio-display-plugin/
+├── index.js                          # Volumio plugin interface (onStart, saveConfig, etc.)
+├── package.json                      # plugin metadata, volumio_info block
+├── config.json                       # plugin's own defaults (mostly empty)
+├── UIConfig.json                     # declarative settings form
+├── install.sh                        # apt deps + runs display/install/install.sh
+├── uninstall.sh
+├── i18n/strings_en.json
+├── README.md                         # public-facing
+├── LICENSE
+└── display/                          # the Python display (current repo)
+    ├── main.py
+    ├── config/
+    ├── themes/default/
+    ├── screens/
+    │   ├── devices/                  # NEW — screen abstraction
+    │   │   ├── base.py
+    │   │   ├── oled_ssd1322.py
+    │   │   └── tft_ili9341.py
+    │   ├── playback.py
+    │   ├── screensaver.py
+    │   └── …
+    ├── tools/
+    │   ├── admin.py                  # NEW — CLI bridge
+    │   └── ir_dispatch.sh
+    └── install/
+        ├── volumio-display.service
+        ├── install.sh
+        └── requirements.txt
+```
+
+Node ↔ Python contract: filesystem (TOML files) + service manager (systemctl) + a thin `tools/admin.py` CLI (`list-themes`, `set-theme`, `upload-theme`, `delete-theme`, `set-runtime`, `restart`). No IPC. Plugin shells out via `child_process`.
+
+## Screen Abstraction (Phase 5a)
+
+Currently `main.py` is hardcoded to `ssd1322`. The abstraction lets future screen types drop in without touching the orchestrator.
+
+`screens/devices/base.py` exposes a `Device` interface:
+- `device` — underlying luma instance
+- `width`, `height`, `mode`
+- `is_oled: bool` — gates contrast(), hide()/show(), the `_fast_greyscale_display` override, and burn-in mitigations (scanlines, pixel shift, contrast fade) — none of which apply to a TFT
+- standard methods: `display(image)`, `hide()`, `show()`, `contrast(level)`
+
+A factory `create_device(runtime_cfg)` reads `[display] type` from `runtime.toml` and returns the right subclass. Themes carry `[meta] target_screen = "ssd1322"`; loader warns on mismatch but doesn't refuse (lets users experiment).
+
+ILI9341 ships as a stub that raises `NotImplementedError` — schema valid, code path open, theme work deferred to whenever someone (us, or a contributor) authors a 320×240 theme.
+
+## Install-time screen picker
+
+Out of scope for the install script. Plugin installs with `[display] type = "ssd1322"` as default. User picks the screen type via the Volumio WebUI display-plugin settings page; saving writes `runtime.toml` and restarts the service. More Volumio-idiomatic, works for headless/automated installs.
+
+## Better-ways review (process improvements to consider before phase 5a)
+
+A handful of "we'd do this differently if starting from scratch" items, ranked by impact. Not all need to land before the split; flagging now so we don't forget.
+
+1. **Python virtualenv for install.** Current `install.sh` does `pip install --user`, which mingles our deps with anything else running as the `volumio` user. A dedicated venv at `/opt/synthwave-display/venv/` (or equivalent) isolates us cleanly and survives a system pip upgrade. Update systemd unit's `ExecStart` to point at the venv's python. Low-risk, fairly contained change.
+2. **Theme schema validator.** `tools/admin.py validate-theme <path>` runs static checks against a candidate theme before the plugin extracts it. Fail-fast on missing required keys, unknown sections, malformed asset filenames, paths that would escape the theme folder when unzipped. Plugin calls this before committing to the install.
+3. **JSON Schema for runtime.toml.** Volumio's `UIConfig.json` is its own DSL, but we can derive most of it from a JSON Schema we maintain alongside `runtime.toml`. Single source of truth for "what fields exist, what types, what defaults, what labels for the WebUI." Generator script keeps `UIConfig.json` in sync.
+4. **Simulation device for tests.** `screens/devices/simulation.py` writes PIL `Image` frames to disk instead of SPI. Lets us run integration tests on CI without hardware. Cheap to add when we do the device-abstraction refactor anyway.
+5. **Idempotent install.sh.** Re-running install should never break the system. Currently the script *probably* is, but worth making it explicit (check-before-write everywhere, refuse to overwrite a user's customized `runtime.toml`).
+6. **Plugin upgrade flow.** When the user upgrades the plugin to a new version, their `runtime.toml` shouldn't get clobbered. Plugin install should merge incoming defaults with existing user values, not replace. Schema versioning helps here.
+7. **GitHub Actions CI.** Pre-commit hooks plus a CI run that at minimum: lints (`flake8` or `ruff`), runs `python -m py_compile` on every file, validates the default theme TOML, validates `UIConfig.json` matches the runtime schema, runs whatever pytest we have. Pi-targeted ARM tests likely not feasible on GH runners; simulation device covers most logic.
+8. **CHANGELOG.md** committed alongside the code. Users browsing the new repo can see what shipped when.
+9. **License decision.** What does Volumio require for plugins? Need to check — likely permissive (MIT / Apache-2.0) since they're loaded into a GPL-ish environment. Pick before first push to new repo.
+10. **`AUTOSTART.md` retirement.** That file currently has install notes that overlap `install/install.sh`. Either fold those into a README aimed at developers (not end users — end users use the WebUI) or delete. Pre-split cleanup task.
+
+## Decision log
+
+- **2026-05-13 — Name picked: `Synthwave-Display`.** Old repo retains history & dev/.
+- **2026-05-13 — Split strategy: option B.** New repo's first commit is Volumio-plugin compliant; we do phases 5–8 here first.
+- **2026-05-13 — No original-project attribution.** No code carried forward from Maschine2501/Volumio-OledUI; functionally a clean rewrite.
+- **2026-05-13 — ILI9341 support: stub-ready, theme-deferred.** Schema accepts it, code stubs `NotImplementedError`, no 320×240 theme until someone writes one.
+- **2026-05-13 — Install-time screen picker: WebUI only, no shell prompt.** Avoids breaking headless installs.
