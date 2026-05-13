@@ -33,7 +33,7 @@ const vconf = require('v-conf');
 
 const DISPLAY_SUBDIR = 'display';                // relative to this plugin's directory
 const ADMIN_REL_PATH = 'tools/admin.py';         // inside DISPLAY_SUBDIR
-const SYSTEMD_UNIT   = 'volumio-display.service';
+const SYSTEMD_UNIT   = 'synthwave-display.service';
 
 module.exports = SynthwaveDisplay;
 

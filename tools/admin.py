@@ -61,8 +61,23 @@ CONFIG_DIR    = PROJECT_ROOT / "config"
 THEMES_DIR    = PROJECT_ROOT / "themes"
 RUNTIME_TOML  = CONFIG_DIR / "runtime.toml"
 SETTINGS_TOML = CONFIG_DIR / "settings.toml"
-SYSTEMD_UNIT  = "volumio-display.service"
 LOG_FILE      = Path("/tmp/vfd.log")
+
+# Service name comes from settings.toml so dev and plugin installs can
+# coexist without colliding on the same unit name. Default matches the
+# dev install (`volumio-display.service`); plugin's bundled settings.toml
+# overrides it to `synthwave-display.service`.
+def _read_service_name():
+    try:
+        if SETTINGS_TOML.exists():
+            return str(toml.loads(SETTINGS_TOML.read_text(encoding="utf-8"))
+                       .get("systemd", {})
+                       .get("service_name", "volumio-display.service"))
+    except Exception:
+        pass
+    return "volumio-display.service"
+
+SYSTEMD_UNIT = _read_service_name()
 
 # Canonical asset filenames every theme MAY ship. None are strictly required —
 # missing assets fall through to default theme's. (idle.gif intentionally

@@ -28,6 +28,15 @@ screensaver_frame_period_s  = 0.04
 # brightness fade is throttled to this).
 contrast_update_interval_s  = 1.0
 
+[systemd]
+# Name of the systemd unit that runs the display. Each install carries its
+# own value here so the same admin.py works in any deploy:
+#   - Dev install (this repo, /home/volumio/Volumio-Display/): volumio-display.service
+#   - Plugin install (/data/plugins/user_interface/synthwave_display/): synthwave-display.service
+# The plugin's build script (tools/build-plugin-zip.sh) rewrites this value
+# when assembling the deployable zip.
+service_name = "volumio-display.service"
+
 [internal]
 # In-memory trace ring buffer max events. Dumped to /tmp/vfd-trace.log
 # on SIGUSR1 for Heisenbug diagnosis.

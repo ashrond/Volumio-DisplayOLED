@@ -5,7 +5,7 @@
 # typically /data/plugins/user_interface/synthwave_display/. We:
 #   1. Install Python deps (pip3 --user, as the volumio user)
 #   2. Render the systemd unit with the right paths and install it
-#   3. Grant passwordless sudo for `systemctl <action> volumio-display.service`
+#   3. Grant passwordless sudo for `systemctl <action> synthwave-display.service`
 #      so tools/admin.py can restart from within the plugin
 #   4. Enable + start the service
 #
@@ -15,7 +15,7 @@ set -euo pipefail
 
 PLUGIN_DIR="$(cd "$(dirname "$0")" && pwd)"
 DISPLAY_DIR="$PLUGIN_DIR/display"
-SERVICE_NAME="volumio-display.service"
+SERVICE_NAME="synthwave-display.service"
 SERVICE_DST="/etc/systemd/system/$SERVICE_NAME"
 SUDOERS_FILE="/etc/sudoers.d/synthwave-display"
 

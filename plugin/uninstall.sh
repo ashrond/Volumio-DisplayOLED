@@ -9,7 +9,7 @@
 set -uo pipefail   # NOT -e: every step is best-effort. We never want to
                    # block plugin removal because of a cleanup failure.
 
-SERVICE_NAME="volumio-display.service"
+SERVICE_NAME="synthwave-display.service"
 SERVICE_DST="/etc/systemd/system/$SERVICE_NAME"
 SUDOERS_FILE="/etc/sudoers.d/synthwave-display"
 
