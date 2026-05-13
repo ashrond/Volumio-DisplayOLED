@@ -151,20 +151,115 @@ SynthwaveDisplay.prototype.getUIConfig = function () {
           });
         }
 
-        // Populate burn-in field defaults from current runtime.toml.
+        // Populate every section's field defaults from current runtime.toml.
+        // _setField is null-safe: missing fields silently skipped (so adding
+        // a UI field that doesn't have a runtime counterpart is harmless).
         const runtime = runtimeResp.runtime || {};
-        const burnin = runtime.burnin || {};
-        const setField = (id, val) => {
-          const f = self._findContent(uiconf, 'section_burnin', id);
-          if (f) f.value = val;
-        };
-        setField('quiet_hours_start',           burnin.quiet_hours_start);
-        setField('quiet_hours_end',             burnin.quiet_hours_end);
-        setField('pixel_shift_enabled',         burnin.pixel_shift_enabled);
-        setField('scanline_alternation_enabled', burnin.scanline_alternation_enabled);
-        setField('track_fade_enabled',          burnin.track_fade_enabled);
+        const display = runtime.display || {};
+        const burnin  = runtime.burnin  || {};
+        const timing  = runtime.timing  || {};
+        const volume  = runtime.volume  || {};
+        const menu    = runtime.menu    || {};
+        const ir      = runtime.ir      || {};
+        const debounce = (ir.debounce) || {};
+        const logging = runtime.logging || {};
 
-        defer.resolve(uiconf);
+        // Display Hardware
+        self._setField(uiconf, 'section_display', 'display_type',
+          { value: display.type, label: display.type });
+        self._setField(uiconf, 'section_display', 'display_width',  display.width);
+        self._setField(uiconf, 'section_display', 'display_height', display.height);
+        self._setField(uiconf, 'section_display', 'spi_bus',       display.spi_bus);
+        self._setField(uiconf, 'section_display', 'spi_cs',        display.spi_cs);
+        self._setField(uiconf, 'section_display', 'spi_speed_hz',  display.spi_speed_hz);
+
+        // Populate display-type dropdown from list-devices, marking
+        // unimplemented drivers with a "(coming soon)" suffix.
+        return self._admin(['list-devices']).then((devicesResp) => {
+          const typeField = self._findContent(uiconf, 'section_display', 'display_type');
+          if (typeField) {
+            typeField.options = (devicesResp.devices || []).map((d) => ({
+              value: d.type_name,
+              label: d.type_name + ' (' + d.category + ')'
+                + (d.is_implemented ? '' : ' — coming soon'),
+            }));
+            const match = typeField.options.find((o) => o.value === display.type);
+            if (match) typeField.value = match;
+          }
+
+          // Burn-in
+          self._setField(uiconf, 'section_burnin', 'quiet_hours_start',
+            burnin.quiet_hours_start);
+          self._setField(uiconf, 'section_burnin', 'quiet_hours_end',
+            burnin.quiet_hours_end);
+          self._setField(uiconf, 'section_burnin', 'pixel_shift_enabled',
+            burnin.pixel_shift_enabled);
+          self._setField(uiconf, 'section_burnin', 'pixel_shift_interval_s',
+            burnin.pixel_shift_interval_s);
+          self._setField(uiconf, 'section_burnin', 'scanline_alternation_enabled',
+            burnin.scanline_alternation_enabled);
+          self._setField(uiconf, 'section_burnin', 'scanline_dim_factor',
+            burnin.scanline_dim_factor);
+          self._setField(uiconf, 'section_burnin', 'scanline_alternation_interval_s',
+            burnin.scanline_alternation_interval_s);
+          self._setField(uiconf, 'section_burnin', 'startup_contrast',
+            burnin.startup_contrast);
+          self._setField(uiconf, 'section_burnin', 'track_fade_enabled',
+            burnin.track_fade_enabled);
+          self._setField(uiconf, 'section_burnin', 'track_fade_max',
+            burnin.track_fade_max);
+          self._setField(uiconf, 'section_burnin', 'track_fade_min',
+            burnin.track_fade_min);
+          self._setField(uiconf, 'section_burnin', 'track_fade_min_remaining_s',
+            burnin.track_fade_min_remaining_s);
+
+          // Timing
+          self._setField(uiconf, 'section_timing', 'playback_refresh_seconds',
+            timing.playback_refresh_seconds);
+          self._setField(uiconf, 'section_timing', 'volume_hold_seconds',
+            timing.volume_hold_seconds);
+          self._setField(uiconf, 'section_timing', 'idle_after_stop_seconds',
+            timing.idle_after_stop_seconds);
+          self._setField(uiconf, 'section_timing', 'screen_off_after_idle_seconds',
+            timing.screen_off_after_idle_seconds);
+          self._setField(uiconf, 'section_timing', 'render_tick_seconds',
+            timing.render_tick_seconds);
+          self._setField(uiconf, 'section_timing', 'pause_to_play_debounce_seconds',
+            timing.pause_to_play_debounce_seconds);
+
+          // Volume
+          self._setField(uiconf, 'section_volume', 'volume_max', volume.max);
+          self._setField(uiconf, 'section_volume', 'volume_button_recent_window',
+            volume.button_recent_window);
+
+          // IR
+          self._setField(uiconf, 'section_ir', 'ir_udp_port', menu.ir_udp_port);
+          self._setField(uiconf, 'section_ir', 'menu_timeout_seconds',
+            menu.timeout_seconds);
+          self._setField(uiconf, 'section_ir', 'skip_anim_cooldown_s',
+            ir.skip_anim_cooldown_s);
+          self._setField(uiconf, 'section_ir', 'debounce_right',
+            debounce.KEY_RIGHT);
+          self._setField(uiconf, 'section_ir', 'debounce_left',
+            debounce.KEY_LEFT);
+          self._setField(uiconf, 'section_ir', 'debounce_play',
+            debounce.KEY_PLAY);
+
+          // Logging
+          self._setField(uiconf, 'section_logging', 'log_enabled', logging.enabled);
+          self._setField(uiconf, 'section_logging', 'log_level',
+            { value: logging.level, label: logging.level });
+          self._setField(uiconf, 'section_logging', 'log_file', logging.file);
+          self._setField(uiconf, 'section_logging', 'log_max_bytes', logging.max_bytes);
+          self._setField(uiconf, 'section_logging', 'log_backup_count', logging.backup_count);
+
+          return uiconf;
+        })
+        .then((uiconfReady) => defer.resolve(uiconfReady))
+        .fail((e) => {
+          self.logger.error('[synthwave_display] getUIConfig populate (devices) failed: ' + e);
+          defer.reject(e);
+        });
       } catch (e) {
         self.logger.error('[synthwave_display] getUIConfig populate failed: ' + e);
         defer.reject(e);
@@ -193,25 +288,77 @@ SynthwaveDisplay.prototype.saveTheme = function (data) {
     .fail((err) => self._toastErr('TOAST_ERROR', err));
 };
 
+// All section save handlers use _saveSectionFields with a field map.
+// Each row: [ui_id, runtime.toml section, runtime.toml key, kind].
+// kind controls how the raw UI value is stringified for admin.py set-runtime.
+
 SynthwaveDisplay.prototype.saveBurnin = function (data) {
-  const self = this;
-  // List of (toml_key, ui_id, kind) tuples. `kind` tells _admin how to format.
-  const fields = [
-    ['quiet_hours_start',              'quiet_hours_start',              'number'],
-    ['quiet_hours_end',                'quiet_hours_end',                'number'],
-    ['pixel_shift_enabled',            'pixel_shift_enabled',            'bool'],
-    ['scanline_alternation_enabled',   'scanline_alternation_enabled',   'bool'],
-    ['track_fade_enabled',             'track_fade_enabled',             'bool'],
-  ];
-  const calls = fields.map(([key, uiId, kind]) => {
-    const raw = data[uiId];
-    const val = kind === 'bool' ? (raw ? 'true' : 'false') : String(raw);
-    return self._admin(['set-runtime', 'burnin', key, val]);
-  });
-  return libQ.all(calls)
-    .then(() => self._admin(['restart']))
-    .then(() => self._toastOk('TOAST_SAVED'))
-    .fail((err) => self._toastErr('TOAST_ERROR', err));
+  return this._saveSectionFields(data, [
+    ['quiet_hours_start',              'burnin', 'quiet_hours_start',              'number'],
+    ['quiet_hours_end',                'burnin', 'quiet_hours_end',                'number'],
+    ['pixel_shift_enabled',            'burnin', 'pixel_shift_enabled',            'bool'],
+    ['pixel_shift_interval_s',         'burnin', 'pixel_shift_interval_s',         'number'],
+    ['scanline_alternation_enabled',   'burnin', 'scanline_alternation_enabled',   'bool'],
+    ['scanline_dim_factor',            'burnin', 'scanline_dim_factor',            'number'],
+    ['scanline_alternation_interval_s','burnin', 'scanline_alternation_interval_s','number'],
+    ['startup_contrast',               'burnin', 'startup_contrast',               'number'],
+    ['track_fade_enabled',             'burnin', 'track_fade_enabled',             'bool'],
+    ['track_fade_max',                 'burnin', 'track_fade_max',                 'number'],
+    ['track_fade_min',                 'burnin', 'track_fade_min',                 'number'],
+    ['track_fade_min_remaining_s',     'burnin', 'track_fade_min_remaining_s',     'number'],
+  ]);
+};
+
+SynthwaveDisplay.prototype.saveDisplay = function (data) {
+  return this._saveSectionFields(data, [
+    ['display_type',   'display', 'type',         'string'],
+    ['display_width',  'display', 'width',        'number'],
+    ['display_height', 'display', 'height',       'number'],
+    ['spi_bus',        'display', 'spi_bus',      'number'],
+    ['spi_cs',         'display', 'spi_cs',       'number'],
+    ['spi_speed_hz',   'display', 'spi_speed_hz', 'number'],
+  ]);
+};
+
+SynthwaveDisplay.prototype.saveTiming = function (data) {
+  return this._saveSectionFields(data, [
+    ['playback_refresh_seconds',       'timing', 'playback_refresh_seconds',       'number'],
+    ['volume_hold_seconds',            'timing', 'volume_hold_seconds',            'number'],
+    ['idle_after_stop_seconds',        'timing', 'idle_after_stop_seconds',        'number'],
+    ['screen_off_after_idle_seconds',  'timing', 'screen_off_after_idle_seconds',  'number'],
+    ['render_tick_seconds',            'timing', 'render_tick_seconds',            'number'],
+    ['pause_to_play_debounce_seconds', 'timing', 'pause_to_play_debounce_seconds', 'number'],
+  ]);
+};
+
+SynthwaveDisplay.prototype.saveVolume = function (data) {
+  return this._saveSectionFields(data, [
+    ['volume_max',                  'volume', 'max',                  'number'],
+    ['volume_button_recent_window', 'volume', 'button_recent_window', 'number'],
+  ]);
+};
+
+SynthwaveDisplay.prototype.saveIR = function (data) {
+  // ir_udp_port and menu_timeout_seconds live in [menu], not [ir] — the UI
+  // groups them with IR for user convenience since they're all remote-related.
+  return this._saveSectionFields(data, [
+    ['ir_udp_port',          'menu',         'ir_udp_port',          'number'],
+    ['menu_timeout_seconds', 'menu',         'timeout_seconds',      'number'],
+    ['skip_anim_cooldown_s', 'ir',           'skip_anim_cooldown_s', 'number'],
+    ['debounce_right',       'ir.debounce',  'KEY_RIGHT',            'number'],
+    ['debounce_left',        'ir.debounce',  'KEY_LEFT',             'number'],
+    ['debounce_play',        'ir.debounce',  'KEY_PLAY',             'number'],
+  ]);
+};
+
+SynthwaveDisplay.prototype.saveLogging = function (data) {
+  return this._saveSectionFields(data, [
+    ['log_enabled',      'logging', 'enabled',      'bool'],
+    ['log_level',        'logging', 'level',        'string'],
+    ['log_file',         'logging', 'file',         'string'],
+    ['log_max_bytes',    'logging', 'max_bytes',    'number'],
+    ['log_backup_count', 'logging', 'backup_count', 'number'],
+  ]);
 };
 
 SynthwaveDisplay.prototype.restartService = function () {
@@ -324,6 +471,38 @@ SynthwaveDisplay.prototype._findContent = function (uiconf, sectionId, fieldId) 
   const sec = uiconf.sections.find((s) => s.id === sectionId);
   if (!sec || !sec.content) return null;
   return sec.content.find((c) => c.id === fieldId) || null;
+};
+
+/** Helper: set a field's value if it exists. Silently no-ops if missing.
+ * Accepts plain values or {value, label} objects for select fields. */
+SynthwaveDisplay.prototype._setField = function (uiconf, sectionId, fieldId, val) {
+  if (val === undefined || val === null) return;
+  const field = this._findContent(uiconf, sectionId, fieldId);
+  if (field) field.value = val;
+};
+
+/** Generic section saver. `fields` is a list of [ui_id, section, key, kind]
+ * tuples — kind is 'bool', 'number', 'string', or 'select'. The handler
+ * extracts each field from `data`, formats it, calls admin.py set-runtime,
+ * and finally restarts the service. Used by every saveX handler below. */
+SynthwaveDisplay.prototype._saveSectionFields = function (data, fields) {
+  const self = this;
+  const calls = fields.map((tuple) => {
+    const [uiId, section, key, kind] = tuple;
+    let raw = data[uiId];
+    if (raw && raw.value !== undefined) raw = raw.value;  // select fields
+    let val;
+    switch (kind) {
+      case 'bool':   val = raw ? 'true' : 'false'; break;
+      case 'number': val = String(raw); break;
+      default:       val = String(raw);
+    }
+    return self._admin(['set-runtime', section, key, val]);
+  });
+  return libQ.all(calls)
+    .then(() => self._admin(['restart']))
+    .then(() => self._toastOk('TOAST_SAVED'))
+    .fail((err) => self._toastErr('TOAST_ERROR', err));
 };
 
 SynthwaveDisplay.prototype._toastOk = function (msgKey) {

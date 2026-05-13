@@ -385,14 +385,22 @@ def cmd_get_runtime(args):
 
 
 def cmd_set_runtime(args):
+    """Set a runtime.toml value. Section may be dotted (e.g. `ir.debounce`)
+    to write into nested tables like `[ir.debounce] KEY_RIGHT = …`."""
     if len(args) < 3:
-        emit_err("usage: set-runtime <section> <key> <value>", EXIT_INVALID_ARGS)
+        emit_err("usage: set-runtime <section[.subsection...]> <key> <value>",
+                 EXIT_INVALID_ARGS)
     section, key, raw_value = args[0], args[1], args[2]
     value = parse_value(raw_value)
     doc = load_runtime_for_write()
-    if section not in doc:
-        doc[section] = tomlkit.table() if _HAVE_TOMLKIT else {}
-    doc[section][key] = value
+    # Walk the dotted section path, creating tables as needed.
+    cursor = doc
+    parts = section.split(".")
+    for p in parts:
+        if p not in cursor:
+            cursor[p] = tomlkit.table() if _HAVE_TOMLKIT else {}
+        cursor = cursor[p]
+    cursor[key] = value
     save_runtime(doc)
     emit_ok({
         "section": section, "key": key, "value": value,

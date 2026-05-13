@@ -88,46 +88,224 @@
       "saveButton": {
         "label": "TRANSLATE.SYNTHWAVE_DISPLAY.BUTTON_SAVE_BURNIN",
         "data": [
-          "quiet_hours_start",
-          "quiet_hours_end",
-          "pixel_shift_enabled",
-          "scanline_alternation_enabled",
-          "track_fade_enabled"
+          "quiet_hours_start", "quiet_hours_end",
+          "pixel_shift_enabled", "pixel_shift_interval_s",
+          "scanline_alternation_enabled", "scanline_dim_factor", "scanline_alternation_interval_s",
+          "startup_contrast",
+          "track_fade_enabled", "track_fade_max", "track_fade_min", "track_fade_min_remaining_s"
         ]
       },
       "content": [
-        {
-          "id": "quiet_hours_start",
-          "type": "number",
-          "element": "input",
+        { "id": "quiet_hours_start", "type": "number", "element": "input",
           "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_QUIET_HOURS_START",
-          "attributes": [{ "min": 0 }, { "max": 23 }]
-        },
-        {
-          "id": "quiet_hours_end",
-          "type": "number",
-          "element": "input",
+          "description": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_QUIET_HOURS_DESC",
+          "attributes": [{ "min": 0 }, { "max": 23 }] },
+        { "id": "quiet_hours_end", "type": "number", "element": "input",
           "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_QUIET_HOURS_END",
-          "attributes": [{ "min": 0 }, { "max": 23 }]
-        },
-        {
-          "id": "pixel_shift_enabled",
-          "type": "boolean",
-          "element": "switch",
-          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_PIXEL_SHIFT_ENABLED"
-        },
-        {
-          "id": "scanline_alternation_enabled",
-          "type": "boolean",
-          "element": "switch",
-          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_SCANLINE_ENABLED"
-        },
-        {
-          "id": "track_fade_enabled",
-          "type": "boolean",
-          "element": "switch",
-          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_TRACK_FADE_ENABLED"
-        }
+          "attributes": [{ "min": 0 }, { "max": 23 }] },
+        { "id": "pixel_shift_enabled", "type": "boolean", "element": "switch",
+          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_PIXEL_SHIFT_ENABLED" },
+        { "id": "pixel_shift_interval_s", "type": "number", "element": "input",
+          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_PIXEL_SHIFT_INTERVAL",
+          "attributes": [{ "min": 10 }, { "max": 3600 }] },
+        { "id": "scanline_alternation_enabled", "type": "boolean", "element": "switch",
+          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_SCANLINE_ENABLED" },
+        { "id": "scanline_dim_factor", "type": "number", "element": "input",
+          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_SCANLINE_DIM_FACTOR",
+          "attributes": [{ "min": 0 }, { "max": 1 }] },
+        { "id": "scanline_alternation_interval_s", "type": "number", "element": "input",
+          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_SCANLINE_INTERVAL",
+          "attributes": [{ "min": 1 }, { "max": 3600 }] },
+        { "id": "startup_contrast", "type": "number", "element": "input",
+          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_STARTUP_CONTRAST",
+          "attributes": [{ "min": 0 }, { "max": 255 }] },
+        { "id": "track_fade_enabled", "type": "boolean", "element": "switch",
+          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_TRACK_FADE_ENABLED" },
+        { "id": "track_fade_max", "type": "number", "element": "input",
+          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_TRACK_FADE_MAX",
+          "attributes": [{ "min": 0 }, { "max": 255 }] },
+        { "id": "track_fade_min", "type": "number", "element": "input",
+          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_TRACK_FADE_MIN",
+          "attributes": [{ "min": 0 }, { "max": 255 }] },
+        { "id": "track_fade_min_remaining_s", "type": "number", "element": "input",
+          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_TRACK_FADE_MIN_REMAINING",
+          "attributes": [{ "min": 0 }] }
+      ]
+    },
+
+    {
+      "id": "section_display",
+      "element": "section",
+      "label": "TRANSLATE.SYNTHWAVE_DISPLAY.SECTION_DISPLAY",
+      "icon": "fa-tv",
+      "description": "TRANSLATE.SYNTHWAVE_DISPLAY.SECTION_DISPLAY_DESC",
+      "onSave": {
+        "type": "controller",
+        "endpoint": "user_interface/synthwave_display",
+        "method": "saveDisplay"
+      },
+      "saveButton": {
+        "label": "TRANSLATE.SYNTHWAVE_DISPLAY.BUTTON_SAVE_DISPLAY",
+        "data": ["display_type", "display_width", "display_height", "spi_bus", "spi_cs", "spi_speed_hz"]
+      },
+      "content": [
+        { "id": "display_type", "type": "select", "element": "select",
+          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_DISPLAY_TYPE",
+          "value": { "value": "ssd1322", "label": "SSD1322 (OLED)" },
+          "options": [{ "value": "ssd1322", "label": "SSD1322 (OLED)" }] },
+        { "id": "display_width", "type": "number", "element": "input",
+          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_DISPLAY_WIDTH",
+          "attributes": [{ "min": 1 }] },
+        { "id": "display_height", "type": "number", "element": "input",
+          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_DISPLAY_HEIGHT",
+          "attributes": [{ "min": 1 }] },
+        { "id": "spi_bus", "type": "number", "element": "input",
+          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_SPI_BUS",
+          "attributes": [{ "min": 0 }, { "max": 7 }] },
+        { "id": "spi_cs", "type": "number", "element": "input",
+          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_SPI_CS",
+          "attributes": [{ "min": 0 }, { "max": 7 }] },
+        { "id": "spi_speed_hz", "type": "number", "element": "input",
+          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_SPI_SPEED",
+          "attributes": [{ "min": 100000 }, { "max": 80000000 }] }
+      ]
+    },
+
+    {
+      "id": "section_timing",
+      "element": "section",
+      "label": "TRANSLATE.SYNTHWAVE_DISPLAY.SECTION_TIMING",
+      "icon": "fa-clock-o",
+      "description": "TRANSLATE.SYNTHWAVE_DISPLAY.SECTION_TIMING_DESC",
+      "onSave": {
+        "type": "controller",
+        "endpoint": "user_interface/synthwave_display",
+        "method": "saveTiming"
+      },
+      "saveButton": {
+        "label": "TRANSLATE.SYNTHWAVE_DISPLAY.BUTTON_SAVE_TIMING",
+        "data": ["playback_refresh_seconds", "volume_hold_seconds",
+                 "idle_after_stop_seconds", "screen_off_after_idle_seconds",
+                 "render_tick_seconds", "pause_to_play_debounce_seconds"]
+      },
+      "content": [
+        { "id": "playback_refresh_seconds", "type": "number", "element": "input",
+          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_PLAYBACK_REFRESH",
+          "attributes": [{ "min": 0.1 }, { "max": 10 }] },
+        { "id": "volume_hold_seconds", "type": "number", "element": "input",
+          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_VOLUME_HOLD",
+          "attributes": [{ "min": 0.5 }, { "max": 10 }] },
+        { "id": "idle_after_stop_seconds", "type": "number", "element": "input",
+          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_IDLE_AFTER_STOP",
+          "attributes": [{ "min": 1 }] },
+        { "id": "screen_off_after_idle_seconds", "type": "number", "element": "input",
+          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_SCREEN_OFF_AFTER_IDLE",
+          "attributes": [{ "min": 10 }] },
+        { "id": "render_tick_seconds", "type": "number", "element": "input",
+          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_RENDER_TICK",
+          "attributes": [{ "min": 0.01 }, { "max": 1 }] },
+        { "id": "pause_to_play_debounce_seconds", "type": "number", "element": "input",
+          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_PAUSE_TO_PLAY_DEBOUNCE",
+          "attributes": [{ "min": 0 }, { "max": 5 }] }
+      ]
+    },
+
+    {
+      "id": "section_volume",
+      "element": "section",
+      "label": "TRANSLATE.SYNTHWAVE_DISPLAY.SECTION_VOLUME",
+      "icon": "fa-volume-up",
+      "onSave": {
+        "type": "controller",
+        "endpoint": "user_interface/synthwave_display",
+        "method": "saveVolume"
+      },
+      "saveButton": {
+        "label": "TRANSLATE.SYNTHWAVE_DISPLAY.BUTTON_SAVE_VOLUME",
+        "data": ["volume_max", "volume_button_recent_window"]
+      },
+      "content": [
+        { "id": "volume_max", "type": "number", "element": "input",
+          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_VOLUME_MAX",
+          "attributes": [{ "min": 1 }, { "max": 100 }] },
+        { "id": "volume_button_recent_window", "type": "number", "element": "input",
+          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_VOLUME_RECENT_WINDOW",
+          "attributes": [{ "min": 0 }, { "max": 300 }] }
+      ]
+    },
+
+    {
+      "id": "section_ir",
+      "element": "section",
+      "label": "TRANSLATE.SYNTHWAVE_DISPLAY.SECTION_IR",
+      "icon": "fa-keyboard-o",
+      "description": "TRANSLATE.SYNTHWAVE_DISPLAY.SECTION_IR_DESC",
+      "onSave": {
+        "type": "controller",
+        "endpoint": "user_interface/synthwave_display",
+        "method": "saveIR"
+      },
+      "saveButton": {
+        "label": "TRANSLATE.SYNTHWAVE_DISPLAY.BUTTON_SAVE_IR",
+        "data": ["ir_udp_port", "menu_timeout_seconds", "skip_anim_cooldown_s",
+                 "debounce_right", "debounce_left", "debounce_play"]
+      },
+      "content": [
+        { "id": "ir_udp_port", "type": "number", "element": "input",
+          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_IR_UDP_PORT",
+          "attributes": [{ "min": 1024 }, { "max": 65535 }] },
+        { "id": "menu_timeout_seconds", "type": "number", "element": "input",
+          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_IR_MENU_TIMEOUT",
+          "attributes": [{ "min": 1 }, { "max": 300 }] },
+        { "id": "skip_anim_cooldown_s", "type": "number", "element": "input",
+          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_SKIP_COOLDOWN",
+          "attributes": [{ "min": 0 }, { "max": 30 }] },
+        { "id": "debounce_right", "type": "number", "element": "input",
+          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_DEBOUNCE_RIGHT",
+          "attributes": [{ "min": 0 }, { "max": 5 }] },
+        { "id": "debounce_left", "type": "number", "element": "input",
+          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_DEBOUNCE_LEFT",
+          "attributes": [{ "min": 0 }, { "max": 5 }] },
+        { "id": "debounce_play", "type": "number", "element": "input",
+          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_DEBOUNCE_PLAY",
+          "attributes": [{ "min": 0 }, { "max": 5 }] }
+      ]
+    },
+
+    {
+      "id": "section_logging",
+      "element": "section",
+      "label": "TRANSLATE.SYNTHWAVE_DISPLAY.SECTION_LOGGING",
+      "icon": "fa-file-text-o",
+      "onSave": {
+        "type": "controller",
+        "endpoint": "user_interface/synthwave_display",
+        "method": "saveLogging"
+      },
+      "saveButton": {
+        "label": "TRANSLATE.SYNTHWAVE_DISPLAY.BUTTON_SAVE_LOGGING",
+        "data": ["log_enabled", "log_level", "log_file", "log_max_bytes", "log_backup_count"]
+      },
+      "content": [
+        { "id": "log_enabled", "type": "boolean", "element": "switch",
+          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_LOG_ENABLED" },
+        { "id": "log_level", "type": "select", "element": "select",
+          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_LOG_LEVEL",
+          "value": { "value": "INFO", "label": "INFO" },
+          "options": [
+            { "value": "DEBUG",   "label": "DEBUG" },
+            { "value": "INFO",    "label": "INFO" },
+            { "value": "WARNING", "label": "WARNING" },
+            { "value": "ERROR",   "label": "ERROR" }
+          ] },
+        { "id": "log_file", "type": "string", "element": "input",
+          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_LOG_FILE" },
+        { "id": "log_max_bytes", "type": "number", "element": "input",
+          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_LOG_MAX_BYTES",
+          "attributes": [{ "min": 1024 }] },
+        { "id": "log_backup_count", "type": "number", "element": "input",
+          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_LOG_BACKUP_COUNT",
+          "attributes": [{ "min": 0 }, { "max": 100 }] }
       ]
     },
 
