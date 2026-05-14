@@ -139,6 +139,27 @@ class _MenuPage:
         self.selected_idx = selected_idx
 
 
+class _EditorPage:
+    """Single-numeric-value editor that piggybacks on the regular menu render
+    path. UP/DOWN modify by step, LEFT/RIGHT by step*5, PLAY saves and pops,
+    MENU cancels. Exposes the same shape (.items, .selected_idx, .title) the
+    renderer expects; .items is a property so the displayed value is always
+    fresh after a value change."""
+    def __init__(self, title, value, vmin, vmax, step, format_fn, save_fn):
+        self.title = title
+        self.value = value
+        self.vmin = vmin
+        self.vmax = vmax
+        self.step = step
+        self.format_fn = format_fn
+        self.save_fn = save_fn       # called with the new value when PLAY is pressed
+        self.selected_idx = 0        # always 0 — only one item
+
+    @property
+    def items(self):
+        return [(self.format_fn(self.value), None)]
+
+
 def _http_get(path, timeout=2.0):
     """Synchronous GET against Volumio's REST API. Returns parsed JSON or raises."""
     url = "http://localhost:3000" + path
@@ -318,9 +339,141 @@ def _menu_action_reboot():
         log.error("reboot failed: %s", e)
 
 
-def _menu_open_bluetooth_stub():
-    items = [("(coming soon)", None), ("< Back", _menu_pop)]
+def _menu_action_shutdown():
+    log.warning("MENU: shutdown requested")
+    try:
+        subprocess.Popen(["sudo", "/sbin/poweroff"],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception as e:
+        log.error("shutdown failed: %s", e)
+
+
+def _menu_open_restart_system():
+    """Submenu: Restart vs Shutdown. Both already NOPASSWD via Volumio's
+    base sudoers — no plugin-side permissions needed."""
+    items = [
+        ("Restart",  _menu_action_reboot),
+        ("Shutdown", _menu_action_shutdown),
+        ("< Back",   _menu_pop),
+    ]
+    _menu_push(_MenuPage(items, "Restart System"))
+
+
+# ── Bluetooth ───────────────────────────────────────────────────────────────
+# Volumio doesn't expose a bluetooth toggle plugin; bluez's bluetooth.service
+# is what governs whether the radio is up. systemctl is NOPASSWD for volumio
+# in the base sudoers so we can drive it directly.
+
+def _bluetooth_state_label():
+    """Returns 'ON' / 'OFF' / '?' for the menu label."""
+    try:
+        result = subprocess.run(
+            ["systemctl", "is-active", "bluetooth.service"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=2.0,
+        )
+        return "ON" if result.stdout.strip() == b"active" else "OFF"
+    except Exception:
+        return "?"
+
+
+def _menu_action_bluetooth_enable():
+    log.info("MENU: bluetooth enable")
+    try:
+        subprocess.Popen(["sudo", "systemctl", "start", "bluetooth.service"],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception as e:
+        log.error("bluetooth enable failed: %s", e)
+    _menu_close()
+
+
+def _menu_action_bluetooth_disable():
+    log.info("MENU: bluetooth disable")
+    try:
+        subprocess.Popen(["sudo", "systemctl", "stop", "bluetooth.service"],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception as e:
+        log.error("bluetooth disable failed: %s", e)
+    _menu_close()
+
+
+def _menu_open_bluetooth():
+    state = _bluetooth_state_label()
+    items = [
+        (f"Currently: {state}", None),
+        ("Enable",  _menu_action_bluetooth_enable),
+        ("Disable", _menu_action_bluetooth_disable),
+        ("< Back",  _menu_pop),
+    ]
     _menu_push(_MenuPage(items, "Bluetooth"))
+
+
+# ── Set Max Vol ─────────────────────────────────────────────────────────────
+# Editor screen for Volumio's alsa_controller.volumemax. Mirrors the call the
+# WebUI makes (saveVolumeOptions) so the change persists and notifies the
+# whole stack. We rebuild the full payload from current config so other
+# volume settings (curve, steps, mixer) are preserved.
+
+def _set_volumio_max_volume(new_max):
+    """Send saveVolumeOptions to alsa_controller. Returns True if the emit
+    happened, False on read/emit failure."""
+    try:
+        with open(_VOLUMIO_ALSA_CONFIG, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+    except Exception as e:
+        log.warning("read alsa config failed: %s", e)
+        return False
+
+    def _v(key, default=""):
+        v = cfg.get(key)
+        if isinstance(v, dict):
+            return v.get("value", default)
+        return default if v is None else v
+
+    payload = {
+        "volumestart":     {"value": str(_v("volumestart", "20"))},
+        "volumemax":       {"value": str(int(new_max))},
+        "volumecurvemode": {"value": str(_v("volumecurvemode", "logarithmic"))},
+        "volumesteps":     {"value": str(_v("volumesteps", "1"))},
+        "mpdvolume":       _v("mpdvolume", False),
+        "mixer_type":      {"value": str(_v("mixer_type", "Hardware"))},
+        "mixer":           {"value": str(_v("mixer", ""))},
+    }
+    try:
+        sio.emit("callMethod", {
+            "endpoint": "audio_interface/alsa_controller",
+            "method":   "saveVolumeOptions",
+            "data":     payload,
+        })
+    except Exception as e:
+        log.warning("emit saveVolumeOptions failed: %s", e)
+        return False
+
+    # Optimistic local update — the periodic refresh will resync if Volumio
+    # rejects or normalizes the value.
+    global volume_max
+    volume_max = int(new_max)
+    log.info("max volume set to %d (sent saveVolumeOptions)", new_max)
+    return True
+
+
+def _menu_save_max_vol_and_close(new_max):
+    _set_volumio_max_volume(new_max)
+    _menu_close()
+
+
+def _menu_open_set_max_vol():
+    # Refresh from disk first so the editor opens on the actual current value.
+    _refresh_volumio_max_volume()
+    page = _EditorPage(
+        title="Set Max Vol",
+        value=int(volume_max),
+        vmin=1,
+        vmax=100,
+        step=1,
+        format_fn=lambda v: f"<  {v:3d}  >",
+        save_fn=_menu_save_max_vol_and_close,
+    )
+    _menu_push(page)
 
 
 def _build_top_level_menu():
@@ -331,8 +484,9 @@ def _build_top_level_menu():
         (lambda: "Shuffle: " + ("ON" if last_random else "OFF"),         _menu_action_toggle_shuffle),
         (lambda: ("Repeat: Single" if last_repeat_single
                   else "Repeat: All" if last_repeat else "Repeat: Off"), _menu_action_toggle_repeat),
-        ("Bluetooth",                                                    _menu_open_bluetooth_stub),
-        ("Reboot",                                                       _menu_action_reboot),
+        ("Set Max Vol",                                                  _menu_open_set_max_vol),
+        (lambda: "Bluetooth: " + _bluetooth_state_label(),               _menu_open_bluetooth),
+        ("Restart System",                                               _menu_open_restart_system),
         ("Close",                                                        _menu_close),
     ]
 # Fade state: (start_perf, duration, prev_image, new_image_or_None)
@@ -1588,6 +1742,25 @@ def _menu_button(button):
         return
     if button == "KEY_MENU":
         _menu_pop()      # back, or close if at top
+        return
+    if isinstance(page, _EditorPage):
+        # Editor: UP/DN ±step, L/R ±step*5, PLAY save, MENU cancel (handled above).
+        if button == "KEY_UP":
+            page.value = min(page.value + page.step,     page.vmax)
+        elif button == "KEY_DOWN":
+            page.value = max(page.value - page.step,     page.vmin)
+        elif button == "KEY_RIGHT":
+            page.value = min(page.value + page.step * 5, page.vmax)
+        elif button == "KEY_LEFT":
+            page.value = max(page.value - page.step * 5, page.vmin)
+        elif button == "KEY_PLAY":
+            log.info("editor save: %s = %s", page.title, page.value)
+            page.save_fn(page.value)
+            return
+        else:
+            return
+        _menu_last_input_perf = time.perf_counter()
+        render_wake.set()
         return
     if button == "KEY_UP":
         with _menu_stack_lock:
