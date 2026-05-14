@@ -228,6 +228,11 @@ font_time   = ImageFont.truetype(FONT_PATH, int(_fonts["time"]))
 font_title  = ImageFont.truetype(FONT_PATH, int(_fonts["title"]))
 font_artist = ImageFont.truetype(FONT_PATH, int(_fonts["artist"]))
 font_volume = ImageFont.truetype(FONT_PATH, int(_fonts["volume"]))
+# Menu fonts have their own slots so the menu can be sized independently of
+# the playback layout. Themes that pre-date these keys fall back to the
+# title/artist sizes.
+font_menu_title = ImageFont.truetype(FONT_PATH, int(_fonts.get("menu_title", _fonts["title"])))
+font_menu_item  = ImageFont.truetype(FONT_PATH, int(_fonts.get("menu_item",  _fonts["artist"])))
 
 # Colors
 _colors = _theme["colors"]

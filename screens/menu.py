@@ -8,7 +8,7 @@ Future work: real navigation (probably by repurposing PLAY for select and
 VOL+/- for up/down while menu is open), real menu items, transitions out.
 """
 from PIL import Image, ImageDraw
-from config.config import font_title, font_artist, text_color
+from config.config import font_menu_title, font_menu_item, text_color
 
 
 def paint_menu(device, items=None, selected_idx=0, title="Menu"):
@@ -24,14 +24,18 @@ def paint_menu(device, items=None, selected_idx=0, title="Menu"):
     items = items or ["(menu items go here)"]
     n = len(items)
 
-    # Title bar
-    tw = font_title.getbbox(title)[2]
+    # Title bar — centered, with a 1px underline spanning the full width to
+    # separate it from the item list visually.
+    tw = font_menu_title.getbbox(title)[2]
     tx = (device.width - tw) // 2
-    draw.text((tx, 0), title, font=font_title, fill=text_color)
+    draw.text((tx, 0), title, font=font_menu_title, fill=text_color)
+    underline_y = font_menu_title.size + 1
+    draw.line((0, underline_y, device.width - 1, underline_y), fill=text_color)
 
-    # Compute visible window
-    line_h = font_artist.size + 2
-    start_y = font_title.size + 3
+    # Compute visible window. start_y leaves room for the title + underline +
+    # 1px breathing room before the first item.
+    line_h = font_menu_item.size + 2
+    start_y = underline_y + 2
     avail_h = device.height - start_y
     visible_count = max(1, avail_h // line_h)
     # Center selection in viewport when possible
@@ -51,13 +55,13 @@ def paint_menu(device, items=None, selected_idx=0, title="Menu"):
             prefix = "> "
         else:
             prefix = "  "
-        draw.text((text_x, y), prefix + items[i], font=font_artist, fill=text_color)
+        draw.text((text_x, y), prefix + items[i], font=font_menu_item, fill=text_color)
 
     # Scroll indicators
     if viewport_start > 0:
-        draw.text((arrow_x, start_y - 2), "^", font=font_artist, fill=text_color)
+        draw.text((arrow_x, start_y - 2), "^", font=font_menu_item, fill=text_color)
     if viewport_end < n:
-        draw.text((arrow_x, device.height - line_h), "v", font=font_artist, fill=text_color)
+        draw.text((arrow_x, device.height - line_h), "v", font=font_menu_item, fill=text_color)
 
     device.display(img)
 

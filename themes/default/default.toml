@@ -19,6 +19,8 @@ time           = 24
 title          = 12
 artist         = 10
 volume         = 20
+menu_title     = 14
+menu_item      = 12
 
 [colors]
 # SSD1322 is 4-bit grayscale. PIL accepts "white" / "black" / etc. for
