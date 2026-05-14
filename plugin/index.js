@@ -39,7 +39,7 @@ module.exports = SynthwaveDisplay;
 
 function SynthwaveDisplay(context) {
   this.context        = context;
-  this.commandRouter  = context.coreCommandRouter;
+  this.commandRouter  = context.coreCommand;
   this.logger         = context.logger;
   this.configManager  = context.configManager;
 }
@@ -57,7 +57,12 @@ SynthwaveDisplay.prototype.onVolumioStart = function () {
 SynthwaveDisplay.prototype.onStart = function () {
   const self = this;
   const defer = libQ.defer();
-  self._systemctl('start')
+  // ir_controller writes /etc/lirc/lircrc from its active profile on Volumio
+  // start, clobbering our routing. user_interface plugins load AFTER
+  // system_hardware, so calling setup-lircrc.sh here reliably wins the race.
+  self._setupLircrc()
+    .fail((err) => self.logger.warn('[synthwave_display] lircrc setup failed (non-fatal): ' + err))
+    .then(() => self._systemctl('start'))
     .then(() => {
       self.config.set('service_status', 'running');
       self.logger.info('[synthwave_display] service started');
@@ -227,8 +232,8 @@ SynthwaveDisplay.prototype.getUIConfig = function () {
           self._setField(uiconf, 'section_timing', 'pause_to_play_debounce_seconds',
             timing.pause_to_play_debounce_seconds);
 
-          // Volume
-          self._setField(uiconf, 'section_volume', 'volume_max', volume.max);
+          // Volume. volume.max is owned by Volumio (alsa_controller) and read
+          // by the Python program directly — no field for it here.
           self._setField(uiconf, 'section_volume', 'volume_button_recent_window',
             volume.button_recent_window);
 
@@ -252,6 +257,31 @@ SynthwaveDisplay.prototype.getUIConfig = function () {
           self._setField(uiconf, 'section_logging', 'log_file', logging.file);
           self._setField(uiconf, 'section_logging', 'log_max_bytes', logging.max_bytes);
           self._setField(uiconf, 'section_logging', 'log_backup_count', logging.backup_count);
+
+          // UI visibility toggles. Plugin-side state lives in v-conf
+          // (config.json) because these control UI visibility, not display
+          // behavior. Volumio 3 has no native section collapsing — the
+          // approximation is filtering sections out of the response. The user
+          // must reopen Settings (or refresh) for changes to take effect
+          // because getUIConfig only fires on form open.
+          const advancedEnabled = self.config.get('show_advanced_settings', false);
+          const themingEnabled  = self.config.get('enable_custom_themes', false);
+          self._setField(uiconf, 'section_advanced_enable', 'show_advanced_settings',
+            !!advancedEnabled);
+          self._setField(uiconf, 'section_theming_enable', 'enable_custom_themes',
+            !!themingEnabled);
+          const hidden = new Set();
+          if (!advancedEnabled) {
+            ['section_burnin', 'section_timing', 'section_ir', 'section_logging']
+              .forEach((id) => hidden.add(id));
+          }
+          if (!themingEnabled) {
+            ['section_theme', 'section_themes_manage']
+              .forEach((id) => hidden.add(id));
+          }
+          if (hidden.size) {
+            uiconf.sections = uiconf.sections.filter((s) => !hidden.has(s.id));
+          }
 
           return uiconf;
         })
@@ -286,6 +316,22 @@ SynthwaveDisplay.prototype.saveTheme = function (data) {
     .then(() => self._admin(['restart']))
     .then(() => self._toastOk('TOAST_THEME_APPLIED'))
     .fail((err) => self._toastErr('TOAST_ERROR', err));
+};
+
+SynthwaveDisplay.prototype.saveThemingEnable = function (data) {
+  // Plugin-side toggle for showing the Theme + Manage Themes sections in the
+  // settings UI. Stored in v-conf because it's UI state, not display config.
+  // The user must reopen Settings (or refresh) to see the sections appear or
+  // disappear — getUIConfig only fires on form open.
+  this.config.set('enable_custom_themes', !!data.enable_custom_themes);
+  return this._toastOk('TOAST_TOGGLE_SAVED');
+};
+
+SynthwaveDisplay.prototype.saveAdvancedEnable = function (data) {
+  // Toggle visibility of the operational tuning sections (Burn-in, Timing,
+  // IR, Logging). Same reload-required caveat as saveThemingEnable.
+  this.config.set('show_advanced_settings', !!data.show_advanced_settings);
+  return this._toastOk('TOAST_TOGGLE_SAVED');
 };
 
 // All section save handlers use _saveSectionFields with a field map.
@@ -333,7 +379,6 @@ SynthwaveDisplay.prototype.saveTiming = function (data) {
 
 SynthwaveDisplay.prototype.saveVolume = function (data) {
   return this._saveSectionFields(data, [
-    ['volume_max',                  'volume', 'max',                  'number'],
     ['volume_button_recent_window', 'volume', 'button_recent_window', 'number'],
   ]);
 };
@@ -461,6 +506,22 @@ SynthwaveDisplay.prototype._systemctl = function (action) {
   proc.on('close', (code) => {
     if (code === 0) defer.resolve();
     else defer.reject('systemctl ' + action + ' exit ' + code + ': ' + stderr);
+  });
+  return defer.promise;
+};
+
+/** Spawn setup-lircrc.sh (writes /etc/lirc/lircrc + restarts irexec). Called
+ * from onStart so our IR routing survives ir_controller's profile rewrites. */
+SynthwaveDisplay.prototype._setupLircrc = function () {
+  const defer = libQ.defer();
+  const scriptPath = path.join(__dirname, DISPLAY_SUBDIR, 'tools', 'setup-lircrc.sh');
+  const proc = spawn('sudo', [scriptPath]);
+  let stderr = '';
+  proc.stderr.on('data', (c) => { stderr += c; });
+  proc.on('error', (err) => defer.reject('spawn failed: ' + err.message));
+  proc.on('close', (code) => {
+    if (code === 0) defer.resolve();
+    else defer.reject('setup-lircrc exit ' + code + ': ' + stderr);
   });
   return defer.promise;
 };

@@ -68,21 +68,25 @@ find "$STAGE_DIR" -name ".DS_Store" -delete 2>/dev/null || true
 SETTINGS="$STAGE_DIR/display/config/settings.toml"
 if [[ -f "$SETTINGS" ]]; then
     echo ":: rewriting service_name → synthwave-display.service"
-    python3 - <<PYEOF
-import sys
-try: import tomlkit as t; mode = 'tomlkit'
-except ImportError: import toml as t; mode = 'toml'
+    # Single-line substitution under the [systemd] table. Tried tomlkit/toml
+    # first for proper TOML round-trip; falls back to sed because the dev
+    # box may not have either lib installed and we don't need full parsing
+    # for this one fixed key.
+    if python3 -c "import tomlkit" 2>/dev/null || python3 -c "import toml" 2>/dev/null; then
+        python3 - <<PYEOF
+try: import tomlkit as t
+except ImportError: import toml as t
 path = "$SETTINGS"
-if mode == 'tomlkit':
-    doc = t.loads(open(path).read())
-else:
-    doc = t.loads(open(path).read())
+doc = t.loads(open(path).read())
 if 'systemd' not in doc:
     doc['systemd'] = {}
 doc['systemd']['service_name'] = 'synthwave-display.service'
 with open(path, 'w') as f:
     f.write(t.dumps(doc))
 PYEOF
+    else
+        sed -i -E 's/^service_name *= *"[^"]*"/service_name = "synthwave-display.service"/' "$SETTINGS"
+    fi
 fi
 
 # --- Zip it ---

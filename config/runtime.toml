@@ -20,9 +20,10 @@ max_bytes      = 2097152
 backup_count   = 3
 
 [volume]
-# Volumio's user-configured max. Display shows "MAX"/"MIN" markers at the
-# bounds. Set to whatever you have in Volumio's volume options.
-max                       = 20
+# Max volume is owned by Volumio (alsa_controller plugin) and read at runtime
+# from /data/configuration/audio_interface/alsa_controller/config.json. There
+# is no override here on purpose — a single source of truth.
+#
 # Heuristic: if a pushState arrives with the same volume but within this
 # many seconds of the last real volume change, treat as a button press at
 # limit (Volumio doesn't send pushStates when vol can't actually change).

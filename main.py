@@ -42,7 +42,7 @@ from config.config import (
     PLAYBACK_REFRESH_SECONDS, VOLUME_HOLD_SECONDS,
     IDLE_AFTER_STOP_SECONDS, SCREEN_OFF_AFTER_IDLE_SECONDS, RENDER_TICK_SECONDS,
     PAUSE_TO_PLAY_DEBOUNCE_SECONDS,
-    VOLUME_MAX, VOLUME_BUTTON_RECENT_WINDOW,
+    VOLUME_BUTTON_RECENT_WINDOW,
     MENU_TIMEOUT_SECONDS, MENU_IR_UDP_PORT,
     # Transition tunings (theme — fade, skip animation)
     TRANSITION_HOLD_AT_END_SECONDS, TRANSITION_FADE_PORTION_CFG,
@@ -398,6 +398,45 @@ last_status_change_wall = 0.0   # time of last status (play/pause/stop) transiti
 last_title_change_wall = 0.0    # time of last title change — gates the volume-at-limit heuristic against track-change pushState bursts
 volume_initialized = False
 PAUSE_TO_PLAY_DEBOUNCE = PAUSE_TO_PLAY_DEBOUNCE_SECONDS
+
+# Max volume is owned by Volumio (alsa_controller plugin). We read it from
+# Volumio's config file at startup and refresh periodically; if the file
+# isn't present (non-Volumio test env), fall back to 100. A future menu
+# option to change Volumio's max would round-trip through Volumio's API and
+# then trigger a re-read here.
+_VOLUMIO_ALSA_CONFIG = "/data/configuration/audio_interface/alsa_controller/config.json"
+_VOLUMIO_MAX_VOLUME_FALLBACK = 100
+_VOLUMIO_MAX_VOLUME_REFRESH_S = 900  # 15 minutes
+volume_max = _VOLUMIO_MAX_VOLUME_FALLBACK  # mutated by _refresh_volumio_max_volume()
+
+
+def _read_volumio_max_volume():
+    """Read alsa_controller's volumemax.value. Returns int or None on failure."""
+    try:
+        with open(_VOLUMIO_ALSA_CONFIG, "r", encoding="utf-8") as f:
+            return int(json.load(f)["volumemax"]["value"])
+    except (FileNotFoundError, KeyError, ValueError, TypeError) as e:
+        log.debug("volumio max-volume read: %s", e)
+        return None
+
+
+def _refresh_volumio_max_volume():
+    """Re-read max volume from Volumio's config and update module global."""
+    global volume_max
+    v = _read_volumio_max_volume()
+    if v is not None and v != volume_max:
+        log.info("volume max: %d → %d (from volumio config)", volume_max, v)
+        volume_max = v
+
+
+def _volume_max_refresh_thread():
+    """Periodic poll of Volumio's max-volume setting. No socket event fires
+    when this value changes, so polling is the best we can do without
+    polling the WebSocket settings API."""
+    while not shutdown_event.is_set():
+        if shutdown_event.wait(_VOLUMIO_MAX_VOLUME_REFRESH_S):
+            return
+        _refresh_volumio_max_volume()
 render_wake = threading.Event()
 shutdown_event = threading.Event()  # set on SIGTERM/SIGINT
 
@@ -610,7 +649,7 @@ def _paint_volume(volume):
         ty = (device.height - font_volume.size) // 2
         draw.text((tx, ty), text, font=font_volume, fill=text_color)
         indicator = None
-        if volume >= VOLUME_MAX:
+        if volume >= volume_max:
             indicator = "MAX"
         elif volume <= 0:
             indicator = "MIN"
@@ -1687,6 +1726,10 @@ if __name__ == "__main__":
 
     _systemd_notify("STATUS=running")
 
+    # Initial volume_max read — must happen before render_thread starts so
+    # the MAX indicator is correct from the first painted frame.
+    _refresh_volumio_max_volume()
+
     # Render thread is NOT a daemon — we want a clean drain on shutdown,
     # and we want the process to NOT silently exit if the main thread returns.
     render_thread = threading.Thread(target=render_loop, daemon=False)
@@ -1696,6 +1739,7 @@ if __name__ == "__main__":
     # button names here; dispatcher routes them to menu nav or to Volumio.
     threading.Thread(target=_ir_udp_listener_thread, daemon=True).start()
     threading.Thread(target=_ir_dispatcher_thread, daemon=True).start()
+    threading.Thread(target=_volume_max_refresh_thread, daemon=True).start()
 
     # Self-healing wait loop. python-socketio's auto-reconnect handles flaps,
     # but if sio.wait() ever returns (library exhausted, fatal error), don't

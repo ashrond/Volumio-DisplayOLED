@@ -107,9 +107,10 @@ for _noisy in ("engineio", "engineio.client", "socketio", "socketio.client",
     if not _l.handlers:
         _l.addHandler(logging.NullHandler())
 
-# Volume
+# Volume. Note: the actual "max volume" is owned by Volumio (alsa_controller
+# config) and read at runtime in main.py — we don't want a second source of
+# truth. The runtime knob below is purely the heuristic-window timer.
 _volume_cfg = _runtime.get("volume", {})
-VOLUME_MAX                  = int(_volume_cfg.get("max", 100))
 VOLUME_BUTTON_RECENT_WINDOW = float(_volume_cfg.get("button_recent_window", 3.0))
 
 # Menu

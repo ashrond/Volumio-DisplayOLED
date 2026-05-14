@@ -4,73 +4,106 @@
   },
   "sections": [
     {
-      "id": "section_theme",
+      "id": "section_display",
       "element": "section",
-      "label": "TRANSLATE.SYNTHWAVE_DISPLAY.SECTION_THEME",
-      "icon": "fa-paint-brush",
-      "description": "TRANSLATE.SYNTHWAVE_DISPLAY.SECTION_THEME_DESC",
+      "label": "TRANSLATE.SYNTHWAVE_DISPLAY.SECTION_DISPLAY",
+      "icon": "fa-tv",
+      "description": "TRANSLATE.SYNTHWAVE_DISPLAY.SECTION_DISPLAY_DESC",
       "onSave": {
         "type": "controller",
         "endpoint": "user_interface/synthwave_display",
-        "method": "saveTheme"
+        "method": "saveDisplay"
       },
       "saveButton": {
-        "label": "TRANSLATE.SYNTHWAVE_DISPLAY.BUTTON_APPLY_THEME",
-        "data": ["active_theme"]
+        "label": "TRANSLATE.SYNTHWAVE_DISPLAY.BUTTON_SAVE_DISPLAY",
+        "data": ["display_type", "display_width", "display_height", "spi_bus", "spi_cs", "spi_speed_hz"]
       },
       "content": [
-        {
-          "id": "active_theme",
-          "type": "select",
-          "element": "select",
-          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_ACTIVE_THEME",
-          "description": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_ACTIVE_THEME_DESC",
-          "value": { "value": "default", "label": "Default" },
-          "options": [
-            { "value": "default", "label": "Default" }
-          ]
-        }
+        { "id": "display_type", "type": "select", "element": "select",
+          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_DISPLAY_TYPE",
+          "value": { "value": "ssd1322", "label": "SSD1322 (OLED)" },
+          "options": [{ "value": "ssd1322", "label": "SSD1322 (OLED)" }] },
+        { "id": "display_width", "type": "number", "element": "input",
+          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_DISPLAY_WIDTH",
+          "attributes": [{ "min": 1 }] },
+        { "id": "display_height", "type": "number", "element": "input",
+          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_DISPLAY_HEIGHT",
+          "attributes": [{ "min": 1 }] },
+        { "id": "spi_bus", "type": "number", "element": "input",
+          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_SPI_BUS",
+          "attributes": [{ "min": 0 }, { "max": 7 }] },
+        { "id": "spi_cs", "type": "number", "element": "input",
+          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_SPI_CS",
+          "attributes": [{ "min": 0 }, { "max": 7 }] },
+        { "id": "spi_speed_hz", "type": "number", "element": "input",
+          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_SPI_SPEED",
+          "attributes": [{ "min": 100000 }, { "max": 80000000 }] }
       ]
     },
 
     {
-      "id": "section_themes_manage",
+      "id": "section_volume",
       "element": "section",
-      "label": "TRANSLATE.SYNTHWAVE_DISPLAY.SECTION_THEMES_MANAGE",
-      "icon": "fa-archive",
-      "description": "TRANSLATE.SYNTHWAVE_DISPLAY.SECTION_THEMES_MANAGE_DESC",
+      "label": "TRANSLATE.SYNTHWAVE_DISPLAY.SECTION_VOLUME",
+      "icon": "fa-volume-up",
       "onSave": {
         "type": "controller",
         "endpoint": "user_interface/synthwave_display",
-        "method": "uploadThemeFromPath"
+        "method": "saveVolume"
       },
       "saveButton": {
-        "label": "TRANSLATE.SYNTHWAVE_DISPLAY.BUTTON_UPLOAD",
-        "data": ["upload_path"]
+        "label": "TRANSLATE.SYNTHWAVE_DISPLAY.BUTTON_SAVE_VOLUME",
+        "data": ["volume_button_recent_window"]
       },
       "content": [
+        { "id": "volume_button_recent_window", "type": "number", "element": "input",
+          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_VOLUME_RECENT_WINDOW",
+          "attributes": [{ "min": 0 }, { "max": 300 }] }
+      ]
+    },
+
+    {
+      "id": "section_actions",
+      "element": "section",
+      "label": "TRANSLATE.SYNTHWAVE_DISPLAY.SECTION_ACTIONS",
+      "icon": "fa-cogs",
+      "content": [
         {
-          "id": "upload_path",
-          "type": "string",
-          "element": "input",
-          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_UPLOAD_PATH",
-          "description": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_UPLOAD_PATH_DESC",
-          "value": ""
-        },
-        {
-          "id": "btn_download_default",
+          "id": "btn_restart",
           "element": "button",
-          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.BUTTON_DOWNLOAD_DEFAULT",
+          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.BUTTON_RESTART",
           "onClick": {
             "type": "emit",
             "message": "callMethod",
             "data": {
               "endpoint": "user_interface/synthwave_display",
-              "method": "downloadDefaultTheme",
+              "method": "restartService",
               "data": {}
             }
           }
         }
+      ]
+    },
+
+    {
+      "id": "section_advanced_enable",
+      "element": "section",
+      "label": "TRANSLATE.SYNTHWAVE_DISPLAY.SECTION_ADVANCED_ENABLE",
+      "icon": "fa-sliders",
+      "description": "TRANSLATE.SYNTHWAVE_DISPLAY.SECTION_ADVANCED_ENABLE_DESC",
+      "onSave": {
+        "type": "controller",
+        "endpoint": "user_interface/synthwave_display",
+        "method": "saveAdvancedEnable"
+      },
+      "saveButton": {
+        "label": "TRANSLATE.SYNTHWAVE_DISPLAY.BUTTON_SAVE_ADVANCED_ENABLE",
+        "data": ["show_advanced_settings"]
+      },
+      "content": [
+        { "id": "show_advanced_settings", "type": "boolean", "element": "switch",
+          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_SHOW_ADVANCED_SETTINGS",
+          "description": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_SHOW_ADVANCED_SETTINGS_DESC" }
       ]
     },
 
@@ -134,44 +167,6 @@
     },
 
     {
-      "id": "section_display",
-      "element": "section",
-      "label": "TRANSLATE.SYNTHWAVE_DISPLAY.SECTION_DISPLAY",
-      "icon": "fa-tv",
-      "description": "TRANSLATE.SYNTHWAVE_DISPLAY.SECTION_DISPLAY_DESC",
-      "onSave": {
-        "type": "controller",
-        "endpoint": "user_interface/synthwave_display",
-        "method": "saveDisplay"
-      },
-      "saveButton": {
-        "label": "TRANSLATE.SYNTHWAVE_DISPLAY.BUTTON_SAVE_DISPLAY",
-        "data": ["display_type", "display_width", "display_height", "spi_bus", "spi_cs", "spi_speed_hz"]
-      },
-      "content": [
-        { "id": "display_type", "type": "select", "element": "select",
-          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_DISPLAY_TYPE",
-          "value": { "value": "ssd1322", "label": "SSD1322 (OLED)" },
-          "options": [{ "value": "ssd1322", "label": "SSD1322 (OLED)" }] },
-        { "id": "display_width", "type": "number", "element": "input",
-          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_DISPLAY_WIDTH",
-          "attributes": [{ "min": 1 }] },
-        { "id": "display_height", "type": "number", "element": "input",
-          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_DISPLAY_HEIGHT",
-          "attributes": [{ "min": 1 }] },
-        { "id": "spi_bus", "type": "number", "element": "input",
-          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_SPI_BUS",
-          "attributes": [{ "min": 0 }, { "max": 7 }] },
-        { "id": "spi_cs", "type": "number", "element": "input",
-          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_SPI_CS",
-          "attributes": [{ "min": 0 }, { "max": 7 }] },
-        { "id": "spi_speed_hz", "type": "number", "element": "input",
-          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_SPI_SPEED",
-          "attributes": [{ "min": 100000 }, { "max": 80000000 }] }
-      ]
-    },
-
-    {
       "id": "section_timing",
       "element": "section",
       "label": "TRANSLATE.SYNTHWAVE_DISPLAY.SECTION_TIMING",
@@ -207,30 +202,6 @@
         { "id": "pause_to_play_debounce_seconds", "type": "number", "element": "input",
           "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_PAUSE_TO_PLAY_DEBOUNCE",
           "attributes": [{ "min": 0 }, { "max": 5 }] }
-      ]
-    },
-
-    {
-      "id": "section_volume",
-      "element": "section",
-      "label": "TRANSLATE.SYNTHWAVE_DISPLAY.SECTION_VOLUME",
-      "icon": "fa-volume-up",
-      "onSave": {
-        "type": "controller",
-        "endpoint": "user_interface/synthwave_display",
-        "method": "saveVolume"
-      },
-      "saveButton": {
-        "label": "TRANSLATE.SYNTHWAVE_DISPLAY.BUTTON_SAVE_VOLUME",
-        "data": ["volume_max", "volume_button_recent_window"]
-      },
-      "content": [
-        { "id": "volume_max", "type": "number", "element": "input",
-          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_VOLUME_MAX",
-          "attributes": [{ "min": 1 }, { "max": 100 }] },
-        { "id": "volume_button_recent_window", "type": "number", "element": "input",
-          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_VOLUME_RECENT_WINDOW",
-          "attributes": [{ "min": 0 }, { "max": 300 }] }
       ]
     },
 
@@ -310,21 +281,92 @@
     },
 
     {
-      "id": "section_actions",
+      "id": "section_theming_enable",
       "element": "section",
-      "label": "TRANSLATE.SYNTHWAVE_DISPLAY.SECTION_ACTIONS",
-      "icon": "fa-cogs",
+      "label": "TRANSLATE.SYNTHWAVE_DISPLAY.SECTION_THEMING_ENABLE",
+      "icon": "fa-paint-brush",
+      "description": "TRANSLATE.SYNTHWAVE_DISPLAY.SECTION_THEMING_ENABLE_DESC",
+      "onSave": {
+        "type": "controller",
+        "endpoint": "user_interface/synthwave_display",
+        "method": "saveThemingEnable"
+      },
+      "saveButton": {
+        "label": "TRANSLATE.SYNTHWAVE_DISPLAY.BUTTON_SAVE_THEMING_ENABLE",
+        "data": ["enable_custom_themes"]
+      },
+      "content": [
+        { "id": "enable_custom_themes", "type": "boolean", "element": "switch",
+          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_ENABLE_CUSTOM_THEMES",
+          "description": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_ENABLE_CUSTOM_THEMES_DESC" }
+      ]
+    },
+
+    {
+      "id": "section_theme",
+      "element": "section",
+      "label": "TRANSLATE.SYNTHWAVE_DISPLAY.SECTION_THEME",
+      "icon": "fa-paint-brush",
+      "description": "TRANSLATE.SYNTHWAVE_DISPLAY.SECTION_THEME_DESC",
+      "onSave": {
+        "type": "controller",
+        "endpoint": "user_interface/synthwave_display",
+        "method": "saveTheme"
+      },
+      "saveButton": {
+        "label": "TRANSLATE.SYNTHWAVE_DISPLAY.BUTTON_APPLY_THEME",
+        "data": ["active_theme"]
+      },
       "content": [
         {
-          "id": "btn_restart",
+          "id": "active_theme",
+          "type": "select",
+          "element": "select",
+          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_ACTIVE_THEME",
+          "description": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_ACTIVE_THEME_DESC",
+          "value": { "value": "default", "label": "Default" },
+          "options": [
+            { "value": "default", "label": "Default" }
+          ]
+        }
+      ]
+    },
+
+    {
+      "id": "section_themes_manage",
+      "element": "section",
+      "label": "TRANSLATE.SYNTHWAVE_DISPLAY.SECTION_THEMES_MANAGE",
+      "icon": "fa-archive",
+      "description": "TRANSLATE.SYNTHWAVE_DISPLAY.SECTION_THEMES_MANAGE_DESC",
+      "onSave": {
+        "type": "controller",
+        "endpoint": "user_interface/synthwave_display",
+        "method": "uploadThemeFromPath"
+      },
+      "saveButton": {
+        "label": "TRANSLATE.SYNTHWAVE_DISPLAY.BUTTON_UPLOAD",
+        "data": ["upload_path"]
+      },
+      "content": [
+        {
+          "id": "upload_path",
+          "type": "string",
+          "element": "input",
+          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_UPLOAD_PATH",
+          "description": "TRANSLATE.SYNTHWAVE_DISPLAY.FIELD_UPLOAD_PATH_DESC",
+          "value": ""
+        },
+        {
+          "id": "btn_download_default",
           "element": "button",
-          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.BUTTON_RESTART",
+          "label": "TRANSLATE.SYNTHWAVE_DISPLAY.BUTTON_DOWNLOAD_DEFAULT",
+          "description": "TRANSLATE.SYNTHWAVE_DISPLAY.BUTTON_DOWNLOAD_DEFAULT_DESC",
           "onClick": {
             "type": "emit",
             "message": "callMethod",
             "data": {
               "endpoint": "user_interface/synthwave_display",
-              "method": "restartService",
+              "method": "downloadDefaultTheme",
               "data": {}
             }
           }
