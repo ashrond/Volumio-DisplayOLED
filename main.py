@@ -124,6 +124,7 @@ _menu_stack_lock = threading.Lock()    # protects _menu_stack independently of s
 last_random = False
 last_repeat = False
 last_repeat_single = False
+last_mute = False               # tracked so Set Max Vol can mute/unmute around the alsa rebuild
 # Service type — "webradio" means streaming (no finite duration), drives the
 # chasing-gradient indicator instead of the normal progress bar.
 last_service = ""
@@ -438,6 +439,25 @@ def _set_volumio_max_volume(new_max):
         "mixer_type":      {"value": str(_v("mixer_type", "Hardware"))},
         "mixer":           {"value": str(_v("mixer", ""))},
     }
+
+    # Volumio's saveVolumeOptions rebuilds the alsa mixer. As a side effect
+    # of the rebuild, Volumio's internal volume value snaps to 100 for ~3s
+    # before being rescaled to the user's value at the new max ratio.
+    # Pausing alone isn't enough — MPD stops feeding audio while paused, but
+    # if we resume during that 100-window the resume itself plays at full
+    # blast. So we (a) pause MPD, (b) save options, (c) wait for the rebuild
+    # to settle, (d) force-set volume back to the captured pre-save value
+    # (clamped to the new max), (e) resume. Only does the dance if we were
+    # actually playing.
+    was_playing = (last_status == "play")
+    prev_vol = int(last_volume) if last_volume is not None else None
+
+    if was_playing:
+        try:
+            sio.emit("pause")
+        except Exception as e:
+            log.debug("pre-save pause failed (continuing): %s", e)
+
     try:
         sio.emit("callMethod", {
             "endpoint": "audio_interface/alsa_controller",
@@ -446,13 +466,40 @@ def _set_volumio_max_volume(new_max):
         })
     except Exception as e:
         log.warning("emit saveVolumeOptions failed: %s", e)
+        if was_playing:
+            try: sio.emit("play")
+            except Exception: pass
         return False
+
+    new_max_int = int(new_max)
+
+    def _resume_after_settle():
+        # 1.5s lets saveVolumeOptions + mixer rebuild complete. Volumio's
+        # internal volume value will still be 100 at this point — that's
+        # what we override before unpausing.
+        time.sleep(1.5)
+        if prev_vol is not None:
+            try:
+                sio.emit("volume", min(prev_vol, new_max_int))
+            except Exception as e:
+                log.debug("post-save volume restore failed: %s", e)
+            # Brief settle so the volume change lands in alsa before MPD
+            # resumes feeding audio.
+            time.sleep(0.25)
+        try:
+            sio.emit("play")
+        except Exception as e:
+            log.debug("post-save play failed: %s", e)
+
+    if was_playing:
+        threading.Thread(target=_resume_after_settle, daemon=True).start()
 
     # Optimistic local update — the periodic refresh will resync if Volumio
     # rejects or normalizes the value.
     global volume_max
-    volume_max = int(new_max)
-    log.info("max volume set to %d (sent saveVolumeOptions)", new_max)
+    volume_max = new_max_int
+    log.info("max volume set to %d (sent saveVolumeOptions, paused_during=%s, prev_vol=%s)",
+             new_max_int, was_playing, prev_vol)
     return True
 
 
@@ -1459,7 +1506,7 @@ def _handle_pushstate(data):
     global volume_initialized, last_volume, last_title, last_artist, last_seek, last_duration
     global last_status, last_event_wall, last_stop_wall, last_volume_event_wall, last_status_change_wall
     global last_title_change_wall
-    global last_random, last_repeat, last_repeat_single, last_service
+    global last_random, last_repeat, last_repeat_single, last_mute, last_service
 
     state = data.get("status", "")
     title = data.get("title", "Unknown")
@@ -1468,11 +1515,22 @@ def _handle_pushstate(data):
     volume = _coerce_int(raw_volume, None) if raw_volume is not None else None
     seek = _coerce_int(data.get("seek"), 0)
     duration = _coerce_int(data.get("duration"), 1) or 1
-    # Mirror Volumio's shuffle/repeat/service state
-    last_random = bool(data.get("random", False))
-    last_repeat = bool(data.get("repeat", False))
-    last_repeat_single = bool(data.get("repeatSingle", False))
-    last_service = str(data.get("service", "") or "")
+    # Mirror Volumio's shuffle/repeat/service state. Only overwrite when the
+    # key is actually present — Volumio sends partial pushStates (e.g. seek
+    # ticks during playback) that omit these fields, and a default-False on
+    # absence would silently reset the cached state every tick. Symptom: the
+    # menu would show "Repeat: Off" after every program restart even though
+    # Volumio's real repeat was On.
+    if data.get("random") is not None:
+        last_random = bool(data["random"])
+    if data.get("repeat") is not None:
+        last_repeat = bool(data["repeat"])
+    if data.get("repeatSingle") is not None:
+        last_repeat_single = bool(data["repeatSingle"])
+    if data.get("mute") is not None:
+        last_mute = bool(data["mute"])
+    if "service" in data:
+        last_service = str(data.get("service") or "")
 
     # Raw dump only when DEBUG, and outside the lock — json.dumps is expensive
     # and used to hold the state_lock unnecessarily.
