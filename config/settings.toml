@@ -42,9 +42,13 @@ service_name = "volumio-display.service"
 # on SIGUSR1 for Heisenbug diagnosis.
 trace_buffer_size           = 4000
 # Warn-thresholds for paint and pushState handler latency. Misses logged
-# at WARNING level. Tune up if false-positives spam the log.
-slow_paint_ms               = 30
-slow_handler_ms             = 20
+# at WARNING level. 2026-06-05: bumped 30/20 → 50/40 after observing that
+# the prior values caught every Volumio track-change pushState burst as
+# routine jitter (~30 WARN/day, all benign). 50ms matches the render tick
+# budget (RENDER_TICK_SECONDS = 0.05); 40ms gives handlers some slack for
+# the burst window without sliding into "genuinely slow" territory.
+slow_paint_ms               = 50
+slow_handler_ms             = 40
 # In-process watchdog. Renders that take longer than `timeout_s` between
 # heartbeats trigger an os._exit(4) so systemd restarts us.
 watchdog_timeout_s          = 60

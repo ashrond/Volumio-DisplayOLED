@@ -1,8 +1,18 @@
 # Autostart on boot — how main.py gets launched after Volumio is up
 
+> **Status (2026-06-05):** the canonical deploy is now the Volumio plugin under
+> `plugin/`, installed via `volumio plugin install` — see `plugin/README.md`.
+> That installer writes a `synthwave-display.service` systemd unit using the
+> same self-healing design described below; only the path and unit name
+> differ. This document remains for the **legacy direct-systemd install**
+> (`install/install.sh`, `install/volumio-display.service`) used during early
+> development, and as a reference for the self-healing design.
+
 This project uses a **systemd service unit** to start automatically on boot,
-ordered after `volumio.service`. The unit lives at `install/volumio-display.service`
-and is installed by `install/install.sh`.
+ordered after `volumio.service`. In the dev install the unit lives at
+`install/volumio-display.service` and is installed by `install/install.sh`.
+In the plugin install the unit is rendered by `plugin/install.sh` at install
+time and named `synthwave-display.service`.
 
 ## Install / update
 
@@ -46,28 +56,22 @@ Three layers of resilience, in order of who reacts first:
    `StartLimitBurst=10` in `StartLimitIntervalSec=600` caps restart storms so
    a genuinely broken install doesn't peg the CPU.
 
-## Why systemd and not a Volumio plugin?
+## Plugin vs. direct systemd install
 
-Volumio does have a plugin system (`/data/plugins/`, with `index.js` + `package.json`
-+ `install.sh` + `UIConfig.json` per plugin). That's the proper way to ship
-something distributable to other Volumio users — it gets a settings page in
-the Volumio web UI, hooks for install/uninstall, etc.
+The plugin under `plugin/` is the canonical install path now (see
+`plugin/README.md`). It still uses systemd under the hood — the plugin's
+`install.sh` renders `synthwave-display.service` at install time, drops a
+scoped sudoers fragment, primes `/etc/lirc/lircrc`, then enables + starts
+the unit. The autostart, watchdog, and resilience properties documented
+above are identical between the two installs; the plugin install adds a
+WebUI settings page, theme upload/download, and Volumio's standard
+install/enable/disable lifecycle.
 
-For a private, single-device install, a systemd service is much simpler and
-gives the exact same autostart behavior. To turn this into a real Volumio
-plugin later, you'd:
-
-- Wrap the project as a node module under `/data/plugins/system_hardware/oled_display/`
-  (or `accessory/`, depending on the plugin category)
-- Add `index.js` that wraps starting/stopping the python process
-- Add `package.json` with the manifest
-- Add `UIConfig.json` to expose tunables (volume.max, timing.*, etc.) in the
-  Volumio web UI
-- Add `install.sh` to set up python deps
-- Use `volumio-plugins-sources` repo to package + publish
-
-That's a substantial bit of work and only worth it if you plan to share the
-plugin. For now the systemd service does the job.
+The legacy direct install (`install/install.sh`) is kept around for
+dev iterations against `~/Volumio-Display/`. Don't run both at once on
+the same Pi — the unit names differ (`volumio-display.service` vs
+`synthwave-display.service`) so they don't collide, but they'd race for
+SPI access.
 
 ## Other autostart mechanisms (not used here)
 

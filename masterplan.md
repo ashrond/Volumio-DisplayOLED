@@ -148,8 +148,61 @@ End state in the Volumio plugin UI:
 - [x] Phase 7: Plugin — theme list/upload/delete/download handlers. Done 2026-05-13. UIConfig section_themes_manage with path-input upload, dynamic per-theme delete buttons (injected by getUIConfig), and download-default button. admin.py gained `download-theme` command. End-to-end zip round-trip verified. **Limitation:** upload is path-based (user puts zip on Pi via SCP/file-manager, then pastes path). True browser file-picker is a future enhancement once we know the right Volumio file-upload pattern.
 - [x] Phase 8: Plugin — runtime settings form + display hardware form. Done 2026-05-13. Full UIConfig now exposes Display Hardware, Burn-in (expanded), Timing, Volume, IR Remote, Logging — every key in `runtime.toml` is editable. `_saveSectionFields` helper unifies the save handlers via field-map tuples. `admin.py set-runtime` accepts dotted section paths (e.g. `ir.debounce KEY_RIGHT 0.8`) so nested TOML tables are addressable from the CLI.
 - [x] Pre-install prep (2026-05-13): plugin's systemd unit renamed from `volumio-display.service` (collides with dev install) to `synthwave-display.service`. `admin.py` now reads `[systemd] service_name` from `settings.toml` with backward-compatible fallback. `tools/build-plugin-zip.sh` assembles a deployable zip from `plugin/` + the Python source as `display/` and rewrites the bundled settings.toml's service_name to match. `.gitignore` updated to exclude `dist/` and `plugin/node_modules/`. Two installs can now coexist on the same Pi with zero collision: dev at `/home/volumio/Volumio-Display/` driving `volumio-display.service`, plugin at `/data/plugins/user_interface/synthwave_display/` driving `synthwave-display.service`.
-- [ ] End-to-end install test — uninstall dev, install plugin zip via `volumio plugin install`, verify settings page renders + service runs.
+- [x] End-to-end install test (2026-05-13). Uninstalled dev, installed plugin zip via `volumio plugin install` (CLI — Volumio 3 has no WebUI upload button). Several install-side fixes shaken out, see Post-install work below.
 - [ ] Split: pick name, create new private repo, push fresh-history production tree
+
+## Post-install work (2026-05-13 → 2026-06-05)
+
+A run of fixes / features that landed after the initial install. All in `ashrond/Volumio-DisplayOLED`.
+
+### Plugin install hardening (2026-05-13)
+
+- `install.sh` and `uninstall.sh` re-exec under bash. Volumio invokes plugin install scripts via `/bin/sh` (dash), bypassing the `#!/bin/bash` shebang; the scripts now `exec /bin/bash "$0" "$@"` if `BASH_VERSION` is empty so `set -euo pipefail`, `[[ ]]`, and heredocs work.
+- `install.sh` runs `npm install --production` itself. Volumio's plugin pipeline does NOT install Node deps automatically — it expects the zip to ship with `node_modules/` pre-populated, OR for the plugin's own install.sh to do it.
+- `package.json` deps pinned to versions that actually exist on npm (`v-conf@^1.4.3`, `fs-extra@^8.1.0`). `^1.5.0` and `^10.0.0` were wishful.
+- `index.js` constructor: `this.commandRouter = context.coreCommand` (was `context.coreCommandRouter`, which is undefined). Without this, getUIConfig throws synchronously and Volumio falls back to "No Configuration Available".
+- Systemd unit: `StartLimitIntervalSec` and `StartLimitBurst` moved to `[Unit]` to clear the warning on Buster's older systemd.
+
+### IR routing that survives Volumio restart (2026-05-13)
+
+- `ir_controller` rewrites `/etc/lirc/lircrc` from its active profile (A1156_Custom for Apple Remote) on every Volumio start, clobbering our routing.
+- New `tools/lircrc.template` is the single source of truth for our action routing; `tools/setup-lircrc.sh` copies it to `/etc/lirc/lircrc` and restarts `irexec.service`.
+- `index.js` `onStart()` spawns `sudo setup-lircrc.sh` before starting our systemd unit. `user_interface` plugins load AFTER `system_hardware`, so we win the race naturally.
+- `install.sh` primes the routing once; sudoers fragment grants NOPASSWD for `setup-lircrc.sh` so the plugin can re-run it.
+- `uninstall.sh` restores `/etc/lirc/lircrc.preplugin` so the original (volumio-direct) routing comes back if the plugin is removed.
+
+### Volume max sourced from Volumio (2026-05-13)
+
+- `volume.max` removed from `runtime.toml`, `config.py`, the WebUI settings form, and `saveVolume` handler.
+- `main.py` reads `/data/configuration/audio_interface/alsa_controller/config.json` (`volumemax.value`) before the render thread starts; a daemon thread re-reads every 15 min (no socketio event fires when this changes).
+- Single source of truth is Volumio's `alsa_controller` plugin.
+
+### Settings UI restructure (2026-05-13)
+
+- Display Hardware moved to the top of the WebUI settings page.
+- Two new toggle sections:
+  - **Show Advanced Settings** — gates Burn-in, Timing, IR Remote, Logging.
+  - **Custom Themes** — gates Theme (active dropdown) + Manage Themes (upload/download/delete).
+- Both off by default; the page renders 5 sections (Display, Volume, Actions, the two toggles). State persists in v-conf; user must close+reopen Settings for the change to take effect (Volumio's UIConfig only fires on form open).
+- Volumio 3 has no native section collapse — there's a `// TODO: check if the section can be collapsed` in `/volumio/app/statemachine.js`. The toggle approach is the closest substitute.
+- Download-default-theme button carries an explanatory description.
+
+### Onscreen menu (2026-05-13 → 2026-06-05)
+
+- New items:
+  - **Set Max Vol** — single-value numeric editor (UP/DN ±1, L/R ±5, PLAY save, MENU cancel). Implemented via a new `_EditorPage` class that piggybacks on `paint_menu` via an `items` property.
+  - **Bluetooth: ON/OFF** — top-level label shows current state from `systemctl is-active bluetooth.service`; submenu offers Enable / Disable / Back. Toggles the systemd unit.
+  - **Restart System** — replaces the bare Reboot item. Submenu: Restart / Shutdown / Back. Both already NOPASSWD via Volumio's base sudoers (`/sbin/reboot`, `/sbin/poweroff`).
+- Menu typography bumped (theme keys `menu_title = 14`, `menu_item = 12`; renderer falls back to existing `title` / `artist` sizes for older themes). 1px underline beneath the title separates it from the item list visually.
+
+### Bug fixes from the menu work
+
+- `_handle_pushstate` now only overwrites cached `random` / `repeat` / `repeatSingle` / `mute` when the key is actually present in the message. Volumio sends partial pushStates (seek-progress ticks) that omit those fields; the previous `data.get(..., False)` clobbered cached state on every tick. Symptom: menu showed Repeat: Off after every program restart even though Volumio itself still had repeat on.
+- Set Max Vol "audible spike to 100%" workaround. `saveVolumeOptions` rebuilds the alsa mixer; as a side effect Volumio's internal volume value snaps to 100 for ~3s before being rescaled to the user's value at the new max. Pause alone wasn't enough — the resume itself plays at vol=100 during that window. Fixed sequence: capture pre-save volume, pause MPD, save options, wait 1.5s for the rebuild, force-set volume back to the captured value (clamped to new max), wait 0.25s, resume.
+
+### Health (2026-06-05)
+
+22+ days on a single PID since the May 13 deploy. Zero errors. Memory flat at 17 MB RSS. The only warnings are paint/handler "SLOW" lines clustering on Volumio track-change pushState bursts — track boundary jitter, not a real issue. `slow_paint_ms` raised 30 → 50 and `slow_handler_ms` 20 → 40 in `settings.toml` to stop logging benign jitter while still surfacing genuine outliers.
 
 Phases 5–8 land in **this repo** before the split. When complete, the new plugin repo gets a single clean push of the production tree (display code + plugin scaffolding); `dev/`, `masterplan.md`, and history stay here.
 
@@ -241,3 +294,12 @@ A handful of "we'd do this differently if starting from scratch" items, ranked b
 - **2026-05-13 — `VFD_NO_LOG=1` env-var convention.** Anything that imports `config.config` but isn't the main display program (admin CLI, future test harnesses, simulation device) sets this to suppress log handler installation. Keeps `/tmp/vfd.log` clean of per-invocation noise.
 - **2026-05-13 — Plugin path = service path.** Systemd unit (rendered by `plugin/install.sh`) ExecStart points at `<plugin_dir>/display/main.py`. All Python code, themes, and `runtime.toml` live inside the plugin folder Volumio extracts. Eliminates "where does the display code live" ambiguity. Plugin upgrades re-extract everything BUT `runtime.toml` is never overwritten by install.sh, so user settings carry through.
 - **2026-05-13 — Scoped passwordless sudo, not blanket.** `install.sh` writes `/etc/sudoers.d/synthwave-display` with NOPASSWD only for `systemctl <start|stop|restart|is-active> volumio-display.service`. Lets `admin.py restart` and the plugin's onStart/onStop work without prompting; no general escalation. Removed cleanly on uninstall.
+- **2026-05-13 — Volumio 3 has no WebUI plugin upload.** Stock builds expect `volumio plugin install` from a directory containing `package.json`. The CLI re-zips the source, posts to `/tmp/plugins/<name>.zip`, and emits an `installPlugin` socket event. Documented in `plugin/README.md`.
+- **2026-05-13 — Volumio plugin install does NOT run `npm install`.** The pipeline assumes the zip ships with `node_modules/` populated, or the plugin's own install.sh handles it. We do the latter (`sudo -u volumio npm install --production --no-package-lock --no-audit`). Avoids bundling node_modules in the zip.
+- **2026-05-13 — `node_modules/` not bundled in plugin zip.** `tools/build-plugin-zip.sh` deliberately excludes it; the plugin's install.sh installs deps on-device. Keeps the zip small and avoids architecture/Node-version pitfalls in pre-built node modules.
+- **2026-05-13 — Volumio 3 has no soft plugin reload.** `pluginmanager.js` lacks `delete require.cache`; `disablePlugin` + `enablePlugin` just flip the `enabled` flag without re-requiring the module. To pick up a new `index.js` we restart `volumio.service`. UIConfig.json changes don't require a restart because `i18nJson` re-reads UIConfig.json on every `getUIConfig` call.
+- **2026-05-13 — IR routing: plugin manages `/etc/lirc/lircrc`, not lircd.conf.** `ir_controller` owns the IR-code → KEY_NAME decode via `lircd.conf` (driven by the user's chosen profile). We replace the action side (`lircrc`) to forward keys through `tools/ir_dispatch.sh` so the display program sees buttons over UDP first. `ir_controller` rewrites lircrc on every Volumio start; our plugin's `onStart()` re-runs `setup-lircrc.sh` afterwards because `user_interface` plugins load after `system_hardware`. If the user switches ir_controller profile, they re-enable our plugin to put the action routing back. We do not — and will not — duplicate the IR-code mapping.
+- **2026-05-13 — Volume max sourced from Volumio, not our config.** `alsa_controller`'s `volumemax` is the single source of truth. main.py reads `/data/configuration/audio_interface/alsa_controller/config.json` at startup, refreshes every 15 min via daemon thread (no socketio event fires when this changes). Removed from `runtime.toml` + WebUI + saveVolume handler.
+- **2026-05-13 — Set Max Vol pauses MPD around the save.** `saveVolumeOptions` rebuilds the alsa mixer; Volumio's internal volume value snaps to 100 for ~3s before being rescaled. Pause + wait 1.5s + force-set volume back to pre-save value + wait 0.25s + resume. The audible spike disappears at the cost of a ~1.75s silent gap.
+- **2026-05-13 — Settings page UI: Volumio 3 has no native section collapsing.** Confirmed via `// TODO: check if the section can be collapsed` in `/volumio/app/statemachine.js`. The plugin offers two toggle sections — Show Advanced Settings, Custom Themes — that filter sections out of the `getUIConfig` response. User must close + reopen Settings for changes to apply since `getUIConfig` only fires on form open. Closest substitute to a collapsible UI we can build without patching Volumio core.
+- **2026-06-05 — `slow_paint_ms` and `slow_handler_ms` thresholds raised** to 50 / 40 (from 30 / 20). The earlier values were caught up in Volumio's track-change pushState burst and logging ~30 WARN/day of benign jitter. 50ms matches `RENDER_TICK_SECONDS = 0.05`; 40ms gives handlers slack for the burst window. Genuine outliers still surface.
